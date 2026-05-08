@@ -1,0 +1,29 @@
+# Local editor and OS noise
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Local environment and secret-bearing files
+.env
+.env.*
+!.env.example
+
+# Local assistant/session artifacts
+.agents/
+.codex/
+
+# Package and test artifacts if experimenting in this repo
+node_modules/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+
+# Local caches should stay out of the repo. The devtainer pre-commit cache
+# lives at ~/.cache/devtainer/pre-commit, not here.
+.cache/

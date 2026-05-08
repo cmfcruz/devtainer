@@ -1,0 +1,11 @@
+failure-threshold: warning
+ignored:
+  # Ubuntu package versions are intentionally inherited from the pinned base
+  # image and refreshed only when rebuilding the dev image.
+  - DL3008
+  # Codex is intentionally installed as the current package published for the
+  # pinned Node line, while the wrapper enforces runtime behavior.
+  - DL3016
+  # nvm.sh is created earlier in the same RUN layer and cannot be resolved by
+  # static shell analysis.
+  - SC1091
