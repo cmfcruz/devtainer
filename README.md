@@ -8,7 +8,7 @@ The main goal is supply-chain isolation. Pre-commit hooks can install pinned but
 
 `Dockerfile` builds an Ubuntu 26.04 image with:
 
-- Bash, Git, GnuPG, curl, build tools, Neovim, ripgrep, fd, and ShellCheck
+- Bash, Git, GnuPG, curl, build tools, Neovim, ripgrep, fd, ShellCheck, `yamllint`, `yq`, `actionlint`, and `kubectl`
 - Node via nvm
 - `@openai/codex`
 - Python via pyenv
