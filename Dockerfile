@@ -54,6 +54,7 @@ RUN apt-get update \
         ripgrep \
         shellcheck \
         tk-dev \
+        tmux \
         xz-utils \
         yamllint \
         zlib1g-dev \

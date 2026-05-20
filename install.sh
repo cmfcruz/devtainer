@@ -19,14 +19,19 @@ docker build \
 
 BIN_DIR="${HOME}/bin"
 DEV_BIN="${BIN_DIR}/dev"
+DEV_INIT_BIN="${BIN_DIR}/dev-init"
+OLD_DEV_SECURE_BIN="${BIN_DIR}/dev-secure"
+DEV_SIGN_BIN="${BIN_DIR}/dev-sign"
 WORK_DIR="/workspace"
 PRE_COMMIT_CACHE_DIR="${HOME}/.cache/devtainer/pre-commit"
+NPM_CACHE_DIR="${HOME}/.cache/devtainer/npm"
+PIP_CACHE_DIR="${HOME}/.cache/devtainer/pip"
 
-mkdir -p "${BIN_DIR}" "${PRE_COMMIT_CACHE_DIR}" "${HOME}/.codex" "${HOME}/.config/nvim"
+mkdir -p "${BIN_DIR}" "${PRE_COMMIT_CACHE_DIR}" "${NPM_CACHE_DIR}" "${PIP_CACHE_DIR}" "${HOME}/.codex" "${HOME}/.config/nvim"
 touch "${HOME}/.gitconfig"
 touch "${HOME}/.gitmessage"
 
-echo "Installing ${DEV_BIN}, which starts an interactive dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.codex mounted into the same home path inside the container, Git and Neovim config mounted read-only, a dedicated pre-commit cache mounted at ${PRE_COMMIT_CACHE_DIR}, and the host GPG agent extra socket mounted as the container GPG agent socket when available. Run \`dev\` to use the image default command, or append a command like \`dev bash\` to override it."
+echo "Installing ${DEV_BIN}, which starts an interactive Codex-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.codex mounted into the same home path inside the container, Git and Neovim config mounted read-only, and no host dependency caches or GPG agent mounted. Run \`dev\` to use the image default command, or append a command like \`dev codex\` to override it."
 cat > "${DEV_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -38,12 +43,80 @@ docker_args=(
   --security-opt no-new-privileges
   --hostname "\$(basename "\$PWD")"
   -e TERM=xterm-256color
-  -e GPG_TTY=/dev/tty
-  -e GNUPGHOME="\$HOME/.gnupg"
+  -v "\$PWD:${WORK_DIR}"
+  -v "\$HOME/.codex:\$HOME/.codex"
+  -v "\$HOME/.gitconfig:\$HOME/.gitconfig:ro"
+  -v "\$HOME/.gitmessage:\$HOME/.gitmessage:ro"
+  -v "\$HOME/.config/nvim:\$HOME/.config/nvim:ro"
+)
+
+docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
+EOF
+
+chmod +x "${DEV_BIN}"
+
+echo "Installed dev at ${DEV_BIN}"
+
+echo "Installing ${DEV_INIT_BIN}, which starts an initialization dev container with the current directory mounted at ${WORK_DIR}, dedicated host dependency caches mounted, Git and Neovim config mounted read-only, and no Codex state or GPG agent mounted."
+cat > "${DEV_INIT_BIN}" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker_args=(
+  --rm
+  -it
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  --hostname "\$(basename "\$PWD")"
+  -e TERM=xterm-256color
   -e PRE_COMMIT_HOME="\$HOME/.cache/pre-commit"
+  -e NPM_CONFIG_CACHE="\$HOME/.cache/npm"
+  -e PIP_CACHE_DIR="\$HOME/.cache/pip"
   -v "\$PWD:${WORK_DIR}"
   -v "${PRE_COMMIT_CACHE_DIR}:\$HOME/.cache/pre-commit"
-  -v "\$HOME/.codex:\$HOME/.codex"
+  -v "${NPM_CACHE_DIR}:\$HOME/.cache/npm"
+  -v "${PIP_CACHE_DIR}:\$HOME/.cache/pip"
+  -v "\$HOME/.gitconfig:\$HOME/.gitconfig:ro"
+  -v "\$HOME/.gitmessage:\$HOME/.gitmessage:ro"
+  -v "\$HOME/.config/nvim:\$HOME/.config/nvim:ro"
+)
+
+docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
+EOF
+
+chmod +x "${DEV_INIT_BIN}"
+
+echo "Installed dev-init at ${DEV_INIT_BIN}"
+
+if [[ -f "${OLD_DEV_SECURE_BIN}" ]]; then
+  if grep -Fq 'PRE_COMMIT_HOME' "${OLD_DEV_SECURE_BIN}" &&
+    grep -Fq 'NPM_CONFIG_CACHE' "${OLD_DEV_SECURE_BIN}" &&
+    grep -Fq 'docker_args=(' "${OLD_DEV_SECURE_BIN}"; then
+    rm -f "${OLD_DEV_SECURE_BIN}"
+    echo "Removed old dev-secure launcher at ${OLD_DEV_SECURE_BIN}"
+  else
+    echo "Found ${OLD_DEV_SECURE_BIN}, but it does not look like a devtainer-generated launcher; leaving it in place."
+  fi
+fi
+
+echo "Installing ${DEV_SIGN_BIN}, which starts a no-network signing dev container with the current directory mounted at ${WORK_DIR}, the dedicated pre-commit cache mounted for already-initialized hooks, Git and Neovim config mounted read-only, public GPG keyring files mounted read-only when present, and the host GPG agent extra socket mounted as the container GPG agent socket when available."
+cat > "${DEV_SIGN_BIN}" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker_args=(
+  --rm
+  -it
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  --network none
+  --hostname "\$(basename "\$PWD")"
+  -e TERM=xterm-256color
+  -e PRE_COMMIT_HOME="\$HOME/.cache/pre-commit"
+  -e GPG_TTY=/dev/tty
+  -e GNUPGHOME="\$HOME/.gnupg"
+  -v "\$PWD:${WORK_DIR}"
+  -v "${PRE_COMMIT_CACHE_DIR}:\$HOME/.cache/pre-commit"
   -v "\$HOME/.gitconfig:\$HOME/.gitconfig:ro"
   -v "\$HOME/.gitmessage:\$HOME/.gitmessage:ro"
   -v "\$HOME/.config/nvim:\$HOME/.config/nvim:ro"
@@ -55,7 +128,7 @@ host_extra_socket="\$(gpgconf --list-dirs agent-extra-socket 2>/dev/null || true
 if [[ -S "\$host_extra_socket" ]]; then
   docker_args+=(-v "\$host_extra_socket:\$container_agent_socket")
 else
-  printf 'dev: warning: host GPG extra socket not found; commit signing will not work until the agent is running.\\n' >&2
+  printf 'dev-sign: warning: host GPG extra socket not found; signing will not work until the agent is running.\\n' >&2
 fi
 
 if [[ -f "\$gpg_dir/pubring.kbx" ]]; then
@@ -69,9 +142,9 @@ fi
 docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
 EOF
 
-chmod +x "${DEV_BIN}"
+chmod +x "${DEV_SIGN_BIN}"
 
-echo "Installed dev at ${DEV_BIN}"
+echo "Installed dev-sign at ${DEV_SIGN_BIN}"
 BASHRC="${HOME}/.bashrc"
 touch "${BASHRC}"
 if ! grep -Fxq "export PATH=\"\$HOME/bin:\$PATH\"" "${BASHRC}"; then
