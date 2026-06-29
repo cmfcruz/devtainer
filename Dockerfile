@@ -7,7 +7,9 @@ ARG USERNAME=dev
 
 # Pin these deliberately. Update after reviewing upstream releases.
 ARG NVM_VERSION=v0.40.3
-ARG NODE_VERSION=24
+ARG NODE_VERSION=24.16.0
+ARG CODEX_VERSION=0.141.0
+ARG CLAUDE_CODE_VERSION=2.1.183
 ARG PYENV_RELEASE=v2.6.28
 ARG PYENV_COMMIT_SHA=485090e7131630b191305316571c06e4ecac3a35
 ARG PYTHON_VERSION=3.12.13
@@ -16,7 +18,11 @@ ARG PRE_COMMIT_VERSION=4.6.0
 ARG SAFE_CHAIN_VERSION=1.5.3
 ARG YQ_VERSION=v4.53.2
 ARG ACTIONLINT_VERSION=1.7.12
+ARG STYLUA_VERSION=2.5.2
 ARG KUBECTL_VERSION=v1.36.0
+ARG HELM_VERSION=v4.2.0
+ARG HELM_SIGNING_KEY_FINGERPRINT=BF888333D96A1C18E2682AAED79D67C9EC016739
+ARG BUOY_VERSION=v1.2.0
 ARG USER_UID=1000
 ARG USER_GID=1000
 
@@ -24,13 +30,15 @@ ENV HOME=/home/${USERNAME}
 ENV NVM_DIR=${HOME}/.nvm
 ENV PYENV_ROOT=${HOME}/.pyenv
 ENV SHELL=/bin/bash
+ENV LANG=C.UTF-8
+ENV LC_CTYPE=C.UTF-8
 
 # Base tools:
-# - ca-certificates/curl/git: needed for nvm/npm/codex/dev workflows
+# - ca-certificates/curl/git: needed for nvm/npm/binary CLI/dev workflows
 # - bash: explicit shell
 # - build-essential/pkg-config: useful for native npm packages/dev builds
 # - lib*/xz-utils/tk-dev: CPython build dependencies for pyenv
-# - ripgrep/fd-find/neovim/shellcheck/yamllint: useful inside the container
+# - ripgrep/fd-find/neovim/shellcheck/jq/yamllint: useful inside the container
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -40,6 +48,8 @@ RUN apt-get update \
         fd-find \
         git \
         gnupg \
+        jq \
+        less \
         libbz2-dev \
         libffi-dev \
         liblzma-dev \
@@ -55,9 +65,11 @@ RUN apt-get update \
         shellcheck \
         tk-dev \
         tmux \
+        unzip \
         xz-utils \
         yamllint \
         zlib1g-dev \
+    && test "$(locale charmap)" = "UTF-8" \
     && rm -rf /var/lib/apt/lists/*
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -69,8 +81,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "${arch}" in \
-        amd64) yq_arch="linux_amd64"; actionlint_arch="linux_amd64"; kubectl_arch="amd64" ;; \
-        arm64) yq_arch="linux_arm64"; actionlint_arch="linux_arm64"; kubectl_arch="arm64" ;; \
+        amd64) yq_arch="linux_amd64"; actionlint_arch="linux_amd64"; kubectl_arch="amd64"; helm_arch="amd64"; stylua_arch="linux-x86_64" ;; \
+        arm64) yq_arch="linux_arm64"; actionlint_arch="linux_arm64"; kubectl_arch="arm64"; helm_arch="arm64"; stylua_arch="linux-aarch64" ;; \
         *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;; \
     esac; \
     curl -fsSLo /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_${yq_arch}"; \
@@ -92,11 +104,34 @@ RUN set -eux; \
     curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl.sha256"; \
     (cd /tmp && echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -); \
     install -m 0755 /tmp/kubectl /usr/local/bin/kubectl; \
-    rm -f /tmp/yq /tmp/yq-checksums /tmp/yq.sha256 "/tmp/${actionlint_archive}" /tmp/actionlint-checksums /tmp/actionlint.sha256 /tmp/actionlint /tmp/kubectl /tmp/kubectl.sha256; \
+    helm_archive="helm-${HELM_VERSION}-linux-${helm_arch}.tar.gz"; \
+    curl -fsSLo "/tmp/${helm_archive}" "https://get.helm.sh/${helm_archive}"; \
+    curl -fsSLo "/tmp/${helm_archive}.sha256sum" "https://get.helm.sh/${helm_archive}.sha256sum"; \
+    curl -fsSLo "/tmp/${helm_archive}.asc" "https://github.com/helm/helm/releases/download/${HELM_VERSION}/${helm_archive}.asc"; \
+    curl -fsSLo /tmp/helm-keys "https://raw.githubusercontent.com/helm/helm/main/KEYS"; \
+    mkdir -m 0700 /tmp/helm-gnupg; \
+    gpg --batch --homedir /tmp/helm-gnupg --import /tmp/helm-keys; \
+    gpg --batch --homedir /tmp/helm-gnupg --fingerprint "${HELM_SIGNING_KEY_FINGERPRINT}"; \
+    (cd /tmp && sha256sum -c "${helm_archive}.sha256sum"); \
+    gpg --batch --homedir /tmp/helm-gnupg --verify "/tmp/${helm_archive}.asc" "/tmp/${helm_archive}"; \
+    tar -xzf "/tmp/${helm_archive}" -C /tmp "linux-${helm_arch}/helm"; \
+    install -m 0755 "/tmp/linux-${helm_arch}/helm" /usr/local/bin/helm; \
+    stylua_archive="stylua-${stylua_arch}.zip"; \
+    curl -fsSLo "/tmp/${stylua_archive}" "https://github.com/JohnnyMorganz/StyLua/releases/download/v${STYLUA_VERSION}/${stylua_archive}"; \
+    stylua_digest="$(curl -fsSL "https://api.github.com/repos/JohnnyMorganz/StyLua/releases/tags/v${STYLUA_VERSION}" | jq -r --arg name "${stylua_archive}" '.assets[] | select(.name == $name) | .digest')"; \
+    stylua_sha256="${stylua_digest#sha256:}"; \
+    test "${stylua_sha256}" != "${stylua_digest}"; \
+    [[ "${stylua_sha256}" =~ ^[a-f0-9]{64}$ ]]; \
+    echo "${stylua_sha256}  /tmp/${stylua_archive}" | sha256sum -c -; \
+    unzip -o -d /tmp "/tmp/${stylua_archive}" stylua; \
+    install -m 0755 /tmp/stylua /usr/local/bin/stylua; \
+    rm -rf /tmp/yq /tmp/yq-checksums /tmp/yq.sha256 "/tmp/${actionlint_archive}" /tmp/actionlint-checksums /tmp/actionlint.sha256 /tmp/actionlint /tmp/kubectl /tmp/kubectl.sha256 "/tmp/${helm_archive}" "/tmp/${helm_archive}.sha256sum" "/tmp/${helm_archive}.asc" /tmp/helm-keys /tmp/helm-gnupg "/tmp/linux-${helm_arch}" "/tmp/${stylua_archive}" /tmp/stylua; \
     yq --version; \
     yamllint --version; \
     actionlint -version; \
-    kubectl version --client=true
+    kubectl version --client=true; \
+    helm version --short; \
+    stylua --version
 
 # Rename Ubuntu's default non-root user used for bind-mounted workspace files.
 RUN groupmod --new-name "${USERNAME}" ubuntu \
@@ -107,11 +142,11 @@ RUN groupmod --new-name "${USERNAME}" ubuntu \
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
 
-# Install nvm, Node, and Codex as the non-root user.
+# Install nvm, Node, Codex, and Claude Code as the non-root user.
 #
 # Notes:
-# - This avoids sudo npm/global package writes.
-# - We install Node 24 LTS-style rather than "node" latest.
+# - This avoids sudo/global package writes.
+# - We install a pinned Node 24 LTS release rather than "node" latest.
 # - We disable npm fund/audit noise in container builds.
 RUN <<'EOF'
 set -euo pipefail
@@ -134,17 +169,62 @@ export PATH="${HOME}/.safe-chain/shims:${HOME}/.safe-chain/bin:${PATH}"
 hash -r
 safe-chain --version
 npm safe-chain-verify
-npm install -g "@openai/codex"
-npm cache clean --force
-mkdir -p "${HOME}/.local/bin"
-CODEX_REAL_BIN="$(command -v codex)"
+case "$(dpkg --print-architecture)" in
+    amd64)
+        codex_arch="x86_64-unknown-linux-musl"
+        claude_platform="linux-x64"
+        ;;
+    arm64)
+        codex_arch="aarch64-unknown-linux-musl"
+        claude_platform="linux-arm64"
+        ;;
+    *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;;
+esac
+mkdir -p "${HOME}/.local/bin" "${HOME}/.local/share"
+codex_archive="codex-package-${codex_arch}.tar.gz"
+codex_url="https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${codex_archive}"
+curl -fsSLo "/tmp/${codex_archive}" "${codex_url}"
+codex_digest="$(curl -fsSL "https://api.github.com/repos/openai/codex/releases/tags/rust-v${CODEX_VERSION}" | jq -r --arg name "${codex_archive}" '.assets[] | select(.name == $name) | .digest')"
+codex_sha256="${codex_digest#sha256:}"
+test "${codex_sha256}" != "${codex_digest}"
+[[ "${codex_sha256}" =~ ^[a-f0-9]{64}$ ]]
+echo "${codex_sha256}  /tmp/${codex_archive}" | sha256sum -c -
+rm -rf "${HOME}/.local/share/codex"
+mkdir -p "${HOME}/.local/share/codex"
+tar -xzf "/tmp/${codex_archive}" -C "${HOME}/.local/share/codex"
+rm -f "/tmp/${codex_archive}"
+CODEX_REAL_BIN="${HOME}/.local/share/codex/bin/codex"
+test -x "${CODEX_REAL_BIN}"
 cat > "${HOME}/.local/bin/codex" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-exec "${CODEX_REAL_BIN}" --sandbox=danger-full-access --ask-for-approval=on-request "\$@"
+exec "${CODEX_REAL_BIN}" --sandbox=danger-full-access --ask-for-approval=on-request \\
+  -c mcp_servers.buoy.command=nvim \\
+  -c 'mcp_servers.buoy.args=["-l","/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]' \\
+  "\$@"
 SCRIPT
 chmod +x "${HOME}/.local/bin/codex"
+claude_manifest="$(curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/manifest.json")"
+claude_sha256="$(jq -r --arg platform "${claude_platform}" '.platforms[$platform].checksum // empty' <<<"${claude_manifest}")"
+[[ "${claude_sha256}" =~ ^[a-f0-9]{64}$ ]]
+curl -fsSLo "${HOME}/.local/bin/claude" "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/${claude_platform}/claude"
+mkdir -p "${HOME}/.local/share/claude"
+CLAUDE_REAL_BIN="${HOME}/.local/share/claude/claude"
+mv "${HOME}/.local/bin/claude" "${CLAUDE_REAL_BIN}"
+echo "${claude_sha256}  ${CLAUDE_REAL_BIN}" | sha256sum -c -
+chmod +x "${CLAUDE_REAL_BIN}"
+cat > "${HOME}/.local/bin/claude" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${CLAUDE_REAL_BIN}" \\
+  --mcp-config /usr/local/share/devtainer/buoy.mcp.json \\
+  --append-system-prompt "\$(cat /usr/local/share/devtainer/buoy-agents.md 2>/dev/null || true)" \\
+  --permission-mode=auto \\
+  "\$@"
+SCRIPT
+chmod +x "${HOME}/.local/bin/claude"
 "${HOME}/.local/bin/codex" --version
+"${HOME}/.local/bin/claude" --version
 EOF
 
 # Install pyenv from a pinned release and verified commit, then install Python
@@ -166,14 +246,18 @@ python --version
 pre-commit --version
 EOF
 
-ENV PATH=${HOME}/.safe-chain/shims:${HOME}/.safe-chain/bin:${HOME}/.local/bin:${PYENV_ROOT}/shims:${PYENV_ROOT}/bin:${PATH}
+ENV NODE_BIN=${NVM_DIR}/versions/node/v${NODE_VERSION}/bin
+ENV PATH=${HOME}/.safe-chain/shims:${HOME}/.safe-chain/bin:${HOME}/.local/bin:${PYENV_ROOT}/shims:${PYENV_ROOT}/bin:${NODE_BIN}:${PATH}
 
-# Make nvm/node/codex and pyenv/python available to both CMD commands and
+# Make nvm/node/codex/claude and pyenv/python available to both CMD commands and
 # interactive shells. Safe Chain is prepended after nvm/pyenv initialization so
 # package manager commands resolve through its shims.
 RUN <<'EOF'
 set -euo pipefail
 cat > "${HOME}/.devtainer-env" <<'SCRIPT'
+export LANG="${LANG:-C.UTF-8}"
+export LC_CTYPE="${LC_CTYPE:-C.UTF-8}"
+
 export NVM_DIR="$HOME/.nvm"
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   # shellcheck source=/dev/null
@@ -189,7 +273,7 @@ if command -v pyenv >/dev/null 2>&1; then
   eval "$(pyenv init - bash)"
 fi
 
-export PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$NODE_BIN:$PATH"
 export GPG_TTY="$(tty 2>/dev/null || true)"
 export DEVTAINER_ENV_LOADED=1
 SCRIPT
@@ -209,7 +293,104 @@ EOF
 
 RUN <<'EOF'
 set -euo pipefail
-cat > "${HOME}/.local/bin/devtainer-entrypoint" <<'SCRIPT'
+cat > "${HOME}/.tmux.conf" <<'SCRIPT'
+# Enable extended-keys to allow shift+enter in Codex
+set -s extended-keys on
+set -as terminal-features ',xterm-ghostty:extkeys'
+set -as terminal-features ',xterm:extkeys'
+
+# Use Vim keys in copy/scroll mode
+setw -g mode-keys vi
+set -g mouse on
+set -g history-limit 50000
+
+# Split panes with easier bindings
+bind | split-window -h
+bind - split-window -v
+
+# Move between panes with Vim keys
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+
+# Resize panes with Vim keys
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
+
+# Prompt before killing all tmux sessions
+bind b confirm-before -p "Kill tmux server? (y/n)" kill-server
+SCRIPT
+
+mkdir -p "${HOME}/.config/nvim"
+cat > "${HOME}/.config/nvim/init.lua" <<'SCRIPT'
+vim.opt.autoread = true
+vim.opt.clipboard = "unnamedplus"
+vim.opt.encoding = "utf-8"
+
+-- Route the system clipboard through OSC 52 escape sequences so yanks and
+-- pastes integrate with the host clipboard via the terminal emulator. The
+-- container has no X/Wayland clipboard provider, so this is what makes
+-- "unnamedplus" reach the host. Requires a terminal with OSC 52 support.
+local ok_osc52, osc52 = pcall(require, "vim.ui.clipboard.osc52")
+if ok_osc52 then
+  vim.g.clipboard = {
+    name = "OSC 52",
+    copy = {
+      ["+"] = osc52.copy("+"),
+      ["*"] = osc52.copy("*"),
+    },
+    paste = {
+      ["+"] = osc52.paste("+"),
+      ["*"] = osc52.paste("*"),
+    },
+  }
+end
+
+vim.opt.fileencoding = "utf-8"
+vim.opt.fileencodings = { "ucs-bom", "utf-8", "default", "latin1" }
+vim.opt.mouse = "a"
+vim.opt.number = true
+vim.opt.relativenumber = true
+
+vim.api.nvim_create_autocmd(
+  { "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" },
+  { command = "checktime" }
+)
+SCRIPT
+EOF
+
+USER root
+
+RUN <<'EOF'
+set -euo pipefail
+mkdir -p /usr/local/lib/devtainer
+install -m 0755 "${HOME}/.local/share/codex/bin/codex" /usr/local/lib/devtainer/codex
+cat > /usr/local/bin/codex <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/lib/devtainer/codex --sandbox=danger-full-access --ask-for-approval=on-request \
+  -c mcp_servers.buoy.command=nvim \
+  -c 'mcp_servers.buoy.args=["-l","/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]' \
+  "$@"
+SCRIPT
+chmod +x /usr/local/bin/codex
+
+install -m 0755 "${HOME}/.local/share/claude/claude" /usr/local/lib/devtainer/claude
+cat > /usr/local/bin/claude <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/local/lib/devtainer/claude \
+  --mcp-config /usr/local/share/devtainer/buoy.mcp.json \
+  --append-system-prompt "$(cat /usr/local/share/devtainer/buoy-agents.md 2>/dev/null || true)" \
+  --permission-mode=auto \
+  "$@"
+SCRIPT
+chmod +x /usr/local/bin/claude
+
+cat > /usr/local/bin/devtainer-entrypoint <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ $# -eq 0 ]]; then
@@ -221,12 +402,116 @@ if [[ -f "$HOME/.devtainer-env" ]]; then
   . "$HOME/.devtainer-env"
   set -u
 fi
+if [[ "${DEVIL_MODE:-}" == "true" ]]; then
+  export PATH="/usr/local/bin:$PATH"
+  nvim_plugin_dir="$HOME/.config/nvim/plugin"
+  nvim_utf8_plugin="$nvim_plugin_dir/devtainer-utf8.lua"
+  mkdir -p "$nvim_plugin_dir"
+  if [[ ! -f "$nvim_utf8_plugin" ]] || grep -Fq "Managed by devtainer." "$nvim_utf8_plugin"; then
+    cat > "$nvim_utf8_plugin" <<'LUA'
+-- Managed by devtainer.
+vim.opt.encoding = "utf-8"
+vim.opt.fileencoding = "utf-8"
+vim.opt.fileencodings = { "ucs-bom", "utf-8", "default", "latin1" }
+LUA
+  fi
+fi
+# Teach Codex to pull live editor context: it reads usage guidance from an
+# AGENTS.md in its home. Only (re)write the copy we manage so a user's own
+# AGENTS.md is never clobbered. Claude Code gets the same guidance through its
+# wrapper's --append-system-prompt flag, so nothing is seeded for it here.
+buoy_doc="/usr/local/share/devtainer/buoy-agents.md"
+if [[ -f "$buoy_doc" ]]; then
+  codex_home="${CODEX_HOME:-$HOME/.codex}"
+  codex_agents="$codex_home/AGENTS.md"
+  if [[ ! -e "$codex_agents" ]] || grep -Fq "Managed by devtainer." "$codex_agents"; then
+    mkdir -p "$codex_home"
+    cp "$buoy_doc" "$codex_agents"
+  fi
+fi
 exec "$@"
 SCRIPT
-chmod +x "${HOME}/.local/bin/devtainer-entrypoint"
+chmod +x /usr/local/bin/devtainer-entrypoint
 EOF
 
+# Install buoy.nvim from GitHub so Neovim auto-loads it in every devtainer mode.
+# It lives in the system site dir (not under $HOME), so the read-only host
+# ~/.config/nvim and ~/.local/share/nvim mounts used by `dev` never shadow it.
+RUN git clone --depth 1 --branch "${BUOY_VERSION}" https://github.com/cmfcruz/buoy.nvim \
+    /usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim
+
+RUN <<'EOF'
+set -euo pipefail
+# Auto-initialize the bundled plugin (publishes the RPC socket + context
+# autocmds, registers :Buoy) via a tiny sibling "start" package, so
+# setup() runs in all modes regardless of the user's mounted init.lua.
+setup_dir=/usr/local/share/nvim/site/pack/devtainer/start/devtainer-buoy/plugin
+mkdir -p "${setup_dir}"
+cat > "${setup_dir}/devtainer-buoy.lua" <<'LUA'
+-- Managed by devtainer: auto-load the bundled buoy.nvim plugin so the
+-- running agent (Codex / Claude Code) can pull live editor context over MCP.
+-- dev-sign is a no-network signing shell with no agent driving the editor,
+-- so buoy serves no purpose there -- and its read-only/locked-down home can't
+-- hold buoy's socket lockfile. Skip it entirely in that mode.
+if vim.env.DEVTAINER_MODE == "sign" then
+  return
+end
+
+local ok, buoy = pcall(require, "buoy")
+if not ok then
+  return
+end
+
+-- devil mode defaults its agent to Claude Code; dev mode uses Codex.
+local agent = vim.env.DEVIL_MODE == "true" and "claude" or "codex"
+buoy.setup({ agent = agent })
+LUA
+
+# Claude Code loads the context bridge from this file via the wrapper's
+# --mcp-config flag, so the host ~/.claude.json is never modified.
+mkdir -p /usr/local/share/devtainer
+cat > /usr/local/share/devtainer/buoy.mcp.json <<'JSON'
+{
+  "mcpServers": {
+    "buoy": {
+      "command": "nvim",
+      "args": ["-l", "/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]
+    }
+  }
+}
+JSON
+
+# Both agents read the same buoy usage guidance, taken from buoy.nvim's
+# recommended "Neovim context" instructions. Claude Code appends it to its
+# system prompt via the wrapper's --append-system-prompt flag; Codex picks it
+# up from a managed ~/.codex/AGENTS.md that the entrypoint seeds.
+cat > /usr/local/share/devtainer/buoy-agents.md <<'MD'
+<!-- Managed by devtainer. Edits are overwritten; delete this line to take ownership. -->
+
+## Neovim context
+
+You may be running inside the user's Neovim through `buoy`. If the
+`buoy` MCP server is available, use it to inspect editor state instead
+of asking the user to paste code.
+
+When the user refers to "this", "here", "the selection", "this file",
+"the current buffer", open files, diagnostics, errors, or warnings:
+
+- Use `get_current_selection` for selected/highlighted code.
+- Use `get_current_file` for the current file path, filetype, and cwd.
+- Use `get_cursor_position` for the cursor location and nearby lines.
+- Use `get_buffer_range` to widen the view around the cursor — the enclosing
+  function, imports, or nearby code — reflecting unsaved edits.
+- Use `get_open_buffers` when the user refers to another open file or buffer.
+- Use `get_diagnostics` when the user asks about errors, warnings, LSP, or failing code.
+
+If a tool returns no useful data, say that briefly and ask the user to
+select code, move the cursor, open the relevant file, or paste the text.
+MD
+EOF
+
+USER ${USERNAME}
 WORKDIR /workspace
 
-ENTRYPOINT ["devtainer-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/devtainer-entrypoint"]
 CMD ["bash"]

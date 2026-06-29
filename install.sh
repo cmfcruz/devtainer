@@ -19,6 +19,7 @@ docker build \
 
 BIN_DIR="${HOME}/bin"
 DEV_BIN="${BIN_DIR}/dev"
+DEVIL_BIN="${BIN_DIR}/devil"
 DEV_INIT_BIN="${BIN_DIR}/dev-init"
 OLD_DEV_SECURE_BIN="${BIN_DIR}/dev-secure"
 DEV_SIGN_BIN="${BIN_DIR}/dev-sign"
@@ -27,14 +28,26 @@ PRE_COMMIT_CACHE_DIR="${HOME}/.cache/devtainer/pre-commit"
 NPM_CACHE_DIR="${HOME}/.cache/devtainer/npm"
 PIP_CACHE_DIR="${HOME}/.cache/devtainer/pip"
 
-mkdir -p "${BIN_DIR}" "${PRE_COMMIT_CACHE_DIR}" "${NPM_CACHE_DIR}" "${PIP_CACHE_DIR}" "${HOME}/.codex" "${HOME}/.config/nvim"
+mkdir -p "${BIN_DIR}" "${PRE_COMMIT_CACHE_DIR}" "${NPM_CACHE_DIR}" "${PIP_CACHE_DIR}" "${HOME}/.codex" "${HOME}/.config/nvim" "${HOME}/.local/share/nvim"
 touch "${HOME}/.gitconfig"
 touch "${HOME}/.gitmessage"
+touch "${HOME}/.tmux.conf"
 
-echo "Installing ${DEV_BIN}, which starts an interactive Codex-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.codex mounted into the same home path inside the container, Git and Neovim config mounted read-only, and no host dependency caches or GPG agent mounted. Run \`dev\` to use the image default command, or append a command like \`dev codex\` to override it."
+DEFAULT_COMMAND_SCRIPT=$(cat <<'SCRIPT'
+if [[ $# -eq 0 ]]; then
+  set -- nvim .
+fi
+SCRIPT
+)
+
+DEVIL_COMMAND_SCRIPT="${DEFAULT_COMMAND_SCRIPT}"
+
+echo "Installing ${DEV_BIN}, which starts an interactive Codex-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.codex mounted into the same home path inside the container, Git and tmux config plus Neovim config and data mounted read-only, and no host dependency caches or GPG agent mounted. Run \`dev\` to open \`nvim .\` directly, or append a command like \`dev codex\` to override it."
 cat > "${DEV_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
+
+${DEFAULT_COMMAND_SCRIPT}
 
 docker_args=(
   --rm
@@ -47,7 +60,9 @@ docker_args=(
   -v "\$HOME/.codex:\$HOME/.codex"
   -v "\$HOME/.gitconfig:\$HOME/.gitconfig:ro"
   -v "\$HOME/.gitmessage:\$HOME/.gitmessage:ro"
+  -v "\$HOME/.tmux.conf:\$HOME/.tmux.conf:ro"
   -v "\$HOME/.config/nvim:\$HOME/.config/nvim:ro"
+  -v "\$HOME/.local/share/nvim:\$HOME/.local/share/nvim:ro"
 )
 
 docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
@@ -56,6 +71,35 @@ EOF
 chmod +x "${DEV_BIN}"
 
 echo "Installed dev at ${DEV_BIN}"
+
+echo "Installing ${DEVIL_BIN}, which starts an interactive dev container with Docker volume devil-${USERNAME} mounted as /home for persistent, self-contained container home state. Run \`devil\` to open \`nvim .\` directly, or append a command like \`devil codex\` to override it."
+cat > "${DEVIL_BIN}" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+${DEVIL_COMMAND_SCRIPT}
+
+volume_name="devil-${USERNAME}"
+docker volume create "\$volume_name" >/dev/null
+
+docker_args=(
+  --rm
+  -it
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  --hostname "\$(basename "\$PWD")"
+  -e TERM=xterm-256color
+  -e DEVIL_MODE=true
+  -v "\$volume_name:/home"
+  -v "\$PWD:${WORK_DIR}"
+)
+
+docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
+EOF
+
+chmod +x "${DEVIL_BIN}"
+
+echo "Installed devil at ${DEVIL_BIN}"
 
 echo "Installing ${DEV_INIT_BIN}, which starts an initialization dev container with the current directory mounted at ${WORK_DIR}, dedicated host dependency caches mounted, Git and Neovim config mounted read-only, and no Codex state or GPG agent mounted."
 cat > "${DEV_INIT_BIN}" << EOF
@@ -112,6 +156,7 @@ docker_args=(
   --network none
   --hostname "\$(basename "\$PWD")"
   -e TERM=xterm-256color
+  -e DEVTAINER_MODE=sign
   -e PRE_COMMIT_HOME="\$HOME/.cache/pre-commit"
   -e GPG_TTY=/dev/tty
   -e GNUPGHOME="\$HOME/.gnupg"
