@@ -8,8 +8,8 @@ ARG USERNAME=dev
 # Pin these deliberately. Update after reviewing upstream releases.
 ARG NVM_VERSION=v0.40.3
 ARG NODE_VERSION=24.16.0
-ARG CODEX_VERSION=0.141.0
-ARG CLAUDE_CODE_VERSION=2.1.183
+ARG CODEX_VERSION=0.145.0
+ARG CLAUDE_CODE_VERSION=2.1.220
 ARG PYENV_RELEASE=v2.6.28
 ARG PYENV_COMMIT_SHA=485090e7131630b191305316571c06e4ecac3a35
 ARG PYTHON_VERSION=3.12.13
@@ -22,7 +22,7 @@ ARG STYLUA_VERSION=2.5.2
 ARG KUBECTL_VERSION=v1.36.0
 ARG HELM_VERSION=v4.2.0
 ARG HELM_SIGNING_KEY_FINGERPRINT=BF888333D96A1C18E2682AAED79D67C9EC016739
-ARG BUOY_VERSION=v1.2.0
+ARG BUOY_VERSION=v3.0.0
 ARG USER_UID=1000
 ARG USER_GID=1000
 
@@ -66,6 +66,7 @@ RUN apt-get update \
         tk-dev \
         tmux \
         unzip \
+        wl-clipboard \
         xz-utils \
         yamllint \
         zlib1g-dev \
@@ -198,10 +199,7 @@ test -x "${CODEX_REAL_BIN}"
 cat > "${HOME}/.local/bin/codex" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-exec "${CODEX_REAL_BIN}" --sandbox=danger-full-access --ask-for-approval=on-request \\
-  -c mcp_servers.buoy.command=nvim \\
-  -c 'mcp_servers.buoy.args=["-l","/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]' \\
-  "\$@"
+exec "${CODEX_REAL_BIN}" --sandbox=danger-full-access --ask-for-approval=on-request "\$@"
 SCRIPT
 chmod +x "${HOME}/.local/bin/codex"
 claude_manifest="$(curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/manifest.json")"
@@ -216,11 +214,7 @@ chmod +x "${CLAUDE_REAL_BIN}"
 cat > "${HOME}/.local/bin/claude" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-exec "${CLAUDE_REAL_BIN}" \\
-  --mcp-config /usr/local/share/devtainer/buoy.mcp.json \\
-  --append-system-prompt "\$(cat /usr/local/share/devtainer/buoy-agents.md 2>/dev/null || true)" \\
-  --permission-mode=auto \\
-  "\$@"
+exec "${CLAUDE_REAL_BIN}" --permission-mode=auto "\$@"
 SCRIPT
 chmod +x "${HOME}/.local/bin/claude"
 "${HOME}/.local/bin/codex" --version
@@ -330,23 +324,26 @@ vim.opt.autoread = true
 vim.opt.clipboard = "unnamedplus"
 vim.opt.encoding = "utf-8"
 
--- Route the system clipboard through OSC 52 escape sequences so yanks and
--- pastes integrate with the host clipboard via the terminal emulator. The
--- container has no X/Wayland clipboard provider, so this is what makes
--- "unnamedplus" reach the host. Requires a terminal with OSC 52 support.
-local ok_osc52, osc52 = pcall(require, "vim.ui.clipboard.osc52")
-if ok_osc52 then
-  vim.g.clipboard = {
-    name = "OSC 52",
-    copy = {
-      ["+"] = osc52.copy("+"),
-      ["*"] = osc52.copy("*"),
-    },
-    paste = {
-      ["+"] = osc52.paste("+"),
-      ["*"] = osc52.paste("*"),
-    },
-  }
+-- When the launcher mounts the host Wayland socket (dev/devil set
+-- WAYLAND_DISPLAY), let Neovim's default provider use wl-copy/wl-paste so
+-- yanks land directly in the host clipboard. Otherwise fall back to OSC 52
+-- escape sequences, which require a terminal emulator that supports them.
+local has_wayland = vim.env.WAYLAND_DISPLAY and vim.fn.executable("wl-copy") == 1
+if not has_wayland then
+  local ok_osc52, osc52 = pcall(require, "vim.ui.clipboard.osc52")
+  if ok_osc52 then
+    vim.g.clipboard = {
+      name = "OSC 52",
+      copy = {
+        ["+"] = osc52.copy("+"),
+        ["*"] = osc52.copy("*"),
+      },
+      paste = {
+        ["+"] = osc52.paste("+"),
+        ["*"] = osc52.paste("*"),
+      },
+    }
+  end
 end
 
 vim.opt.fileencoding = "utf-8"
@@ -371,10 +368,7 @@ install -m 0755 "${HOME}/.local/share/codex/bin/codex" /usr/local/lib/devtainer/
 cat > /usr/local/bin/codex <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/local/lib/devtainer/codex --sandbox=danger-full-access --ask-for-approval=on-request \
-  -c mcp_servers.buoy.command=nvim \
-  -c 'mcp_servers.buoy.args=["-l","/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]' \
-  "$@"
+exec /usr/local/lib/devtainer/codex --sandbox=danger-full-access --ask-for-approval=on-request "$@"
 SCRIPT
 chmod +x /usr/local/bin/codex
 
@@ -382,11 +376,7 @@ install -m 0755 "${HOME}/.local/share/claude/claude" /usr/local/lib/devtainer/cl
 cat > /usr/local/bin/claude <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/local/lib/devtainer/claude \
-  --mcp-config /usr/local/share/devtainer/buoy.mcp.json \
-  --append-system-prompt "$(cat /usr/local/share/devtainer/buoy-agents.md 2>/dev/null || true)" \
-  --permission-mode=auto \
-  "$@"
+exec /usr/local/lib/devtainer/claude --permission-mode=auto "$@"
 SCRIPT
 chmod +x /usr/local/bin/claude
 
@@ -416,18 +406,14 @@ vim.opt.fileencodings = { "ucs-bom", "utf-8", "default", "latin1" }
 LUA
   fi
 fi
-# Teach Codex to pull live editor context: it reads usage guidance from an
-# AGENTS.md in its home. Only (re)write the copy we manage so a user's own
-# AGENTS.md is never clobbered. Claude Code gets the same guidance through its
-# wrapper's --append-system-prompt flag, so nothing is seeded for it here.
-buoy_doc="/usr/local/share/devtainer/buoy-agents.md"
-if [[ -f "$buoy_doc" ]]; then
-  codex_home="${CODEX_HOME:-$HOME/.codex}"
-  codex_agents="$codex_home/AGENTS.md"
-  if [[ ! -e "$codex_agents" ]] || grep -Fq "Managed by devtainer." "$codex_agents"; then
-    mkdir -p "$codex_home"
-    cp "$buoy_doc" "$codex_agents"
-  fi
+# buoy.nvim injects its own editor-context guidance when it launches the
+# agent (Claude Code via --append-system-prompt, Codex via app-server
+# developer instructions), so devtainer no longer seeds a Codex AGENTS.md.
+# Remove a stale copy from older images — but only the one we managed, so a
+# user's own AGENTS.md is never touched.
+codex_agents="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
+if [[ -f "$codex_agents" ]] && grep -Fq "Managed by devtainer." "$codex_agents"; then
+  rm -f "$codex_agents"
 fi
 exec "$@"
 SCRIPT
@@ -449,65 +435,18 @@ setup_dir=/usr/local/share/nvim/site/pack/devtainer/start/devtainer-buoy/plugin
 mkdir -p "${setup_dir}"
 cat > "${setup_dir}/devtainer-buoy.lua" <<'LUA'
 -- Managed by devtainer: auto-load the bundled buoy.nvim plugin so the
--- running agent (Codex / Claude Code) can pull live editor context over MCP.
--- dev-sign is a no-network signing shell with no agent driving the editor,
--- so buoy serves no purpose there -- and its read-only/locked-down home can't
--- hold buoy's socket lockfile. Skip it entirely in that mode.
-if vim.env.DEVTAINER_MODE == "sign" then
-  return
-end
-
+-- running agent (Codex / Claude Code) gets live editor context through
+-- buoy's prompt hook and private agent CLI.
 local ok, buoy = pcall(require, "buoy")
 if not ok then
   return
 end
 
--- devil mode defaults its agent to Claude Code; dev mode uses Codex.
-local agent = vim.env.DEVIL_MODE == "true" and "claude" or "codex"
+-- dev defaults its agent to Claude Code; devil sets DEVTAINER_AGENT=codex
+-- in its launcher. Set DEVTAINER_AGENT explicitly to override either.
+local agent = vim.env.DEVTAINER_AGENT == "codex" and "codex" or "claude"
 buoy.setup({ agent = agent })
 LUA
-
-# Claude Code loads the context bridge from this file via the wrapper's
-# --mcp-config flag, so the host ~/.claude.json is never modified.
-mkdir -p /usr/local/share/devtainer
-cat > /usr/local/share/devtainer/buoy.mcp.json <<'JSON'
-{
-  "mcpServers": {
-    "buoy": {
-      "command": "nvim",
-      "args": ["-l", "/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim/bridge/mcp_bridge.lua"]
-    }
-  }
-}
-JSON
-
-# Both agents read the same buoy usage guidance, taken from buoy.nvim's
-# recommended "Neovim context" instructions. Claude Code appends it to its
-# system prompt via the wrapper's --append-system-prompt flag; Codex picks it
-# up from a managed ~/.codex/AGENTS.md that the entrypoint seeds.
-cat > /usr/local/share/devtainer/buoy-agents.md <<'MD'
-<!-- Managed by devtainer. Edits are overwritten; delete this line to take ownership. -->
-
-## Neovim context
-
-You may be running inside the user's Neovim through `buoy`. If the
-`buoy` MCP server is available, use it to inspect editor state instead
-of asking the user to paste code.
-
-When the user refers to "this", "here", "the selection", "this file",
-"the current buffer", open files, diagnostics, errors, or warnings:
-
-- Use `get_current_selection` for selected/highlighted code.
-- Use `get_current_file` for the current file path, filetype, and cwd.
-- Use `get_cursor_position` for the cursor location and nearby lines.
-- Use `get_buffer_range` to widen the view around the cursor — the enclosing
-  function, imports, or nearby code — reflecting unsaved edits.
-- Use `get_open_buffers` when the user refers to another open file or buffer.
-- Use `get_diagnostics` when the user asks about errors, warnings, LSP, or failing code.
-
-If a tool returns no useful data, say that briefly and ask the user to
-select code, move the cursor, open the relevant file, or paste the text.
-MD
 EOF
 
 USER ${USERNAME}

@@ -12,7 +12,7 @@ The main goal is supply-chain isolation. Pre-commit hooks can install pinned but
 - Node via nvm, pinned in the Dockerfile
 - `@openai/codex`, pinned in the Dockerfile
 - Claude Code, pinned in the Dockerfile
-- [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim), a Neovim plugin cloned into the image that runs Codex or Claude Code in a popup and exposes live editor context to the agent over MCP
+- [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim), a Neovim plugin cloned into the image that runs Codex or Claude Code in a popup and feeds the agent live editor context through a prompt hook and a private agent CLI
 - Python via pyenv
 - `pre-commit`
 
@@ -47,8 +47,6 @@ This builds the Docker image, then installs host launchers at:
 ```bash
 ~/bin/dev
 ~/bin/devil
-~/bin/dev-init
-~/bin/dev-sign
 ```
 
 The default image tag is:
@@ -83,7 +81,7 @@ From any repository:
 dev
 ```
 
-`dev` is the Codex-capable mode. It mounts `~/.codex` read-write, does not mount host dependency caches, and does not mount the host GPG agent.
+`dev` is the Claude Code-capable mode. It mounts `~/.claude` and `~/.claude.json` read-write, mounts dedicated host dependency caches, and mounts the host GPG agent extra socket and public keyring for code signing when available.
 
 With no arguments, every launcher opens `nvim .` directly (no tmux). tmux is still installed if you want it; run `dev tmux` or split panes yourself.
 
@@ -95,53 +93,41 @@ devil
 
 The volume is named `devil-<host username>` and mounted at `/home`. On first use, Docker initializes the empty volume from the image's `/home`, including the default tmux and Neovim settings baked into the image. The managed Codex and Claude Code wrappers are also installed at `/usr/local/bin/codex` and `/usr/local/bin/claude` so existing `devil` volumes created by older images can still use them after rebuilding devtainer.
 
-Use `dev-init` for dependency installation and pre-commit environment setup:
+`dev` handles dependency installation and pre-commit environment setup:
 
 ```bash
-dev-init npm install
-dev-init npm ci
-dev-init pip install -r requirements.txt
-dev-init pre-commit install
-dev-init pre-commit install-hooks
-dev-init pre-commit run --all-files
+dev npm install
+dev npm ci
+dev pip install -r requirements.txt
+dev pre-commit install
+dev pre-commit install-hooks
+dev pre-commit run --all-files
 ```
 
-`dev-init` mounts dedicated host dependency caches, does not mount `~/.codex`, and does not mount the host GPG agent. Use `pre-commit install` to install the Git hook script, and `pre-commit install-hooks` to download and build the hook environments in the shared pre-commit cache.
+Use `pre-commit install` to install the Git hook script, and `pre-commit install-hooks` to download and build the hook environments in the shared pre-commit cache.
 
-Use `dev-sign` for code signing without container network access:
+Code signing also runs in `dev`:
 
 ```bash
-dev-sign git commit -S -m "signed change"
-dev-sign git tag -s v1.0.0
+dev git commit -S -m "signed change"
+dev git tag -s v1.0.0
 ```
 
-`dev-sign` runs with `--network none`. It mounts the host GPG agent extra socket when available, public GPG keyring files read-only when present, and the dedicated pre-commit cache so already-initialized hooks can run during `git commit`. It does not mount `~/.codex`, npm cache, or pip cache.
-
-If a commit needs a pre-commit hook environment that is not already in the shared pre-commit cache, `dev-sign git commit` cannot fetch it because networking is disabled. Warm the cache first:
+`dev` mounts the host GPG agent extra socket when available and public GPG keyring files read-only when present, so signing uses the host agent. Private key files are never mounted. Because `dev` also mounts the shared pre-commit cache, a signed commit reuses already-built hook environments; to skip hooks entirely, use `--no-verify`:
 
 ```bash
-dev-init pre-commit install-hooks
-dev-init pre-commit run --all-files
-dev-sign git commit -S -m "signed change"
+dev git commit -S --no-verify -m "signed change"
 ```
 
-Or, after running checks separately, sign without rerunning hooks:
+Or pass a command to either launcher:
 
 ```bash
-dev-sign git commit -S --no-verify -m "signed change"
-```
-
-Or pass a command to any launcher:
-
-```bash
-dev codex
+dev claude
 dev bash
 dev git status
+dev pre-commit run --all-files
 devil bash
-devil codex
-dev-init bash
-dev-init pre-commit run --all-files
-dev-sign bash
+devil claude
 ```
 
 The hook config checks shell formatting/linting, Dockerfile linting, Markdown linting, YAML syntax, private-key leaks, merge conflict markers, line endings, trailing whitespace, executable shebangs, and stale pre-commit excludes.
@@ -190,18 +176,11 @@ This requires a terminal emulator with OSC 52 support enabled (Ghostty, kitty, W
 The image clones [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim), so Neovim inside every devtainer mode automatically loads it. The plugin does two things:
 
 - Toggles the agent's official TUI (Codex or Claude Code) in a popup window with `:Buoy` or `<F2>`.
-- Exposes the live editor state (current file, cursor position, a range of lines around the cursor, visual selection, open buffers, and LSP diagnostics) to the agent through an MCP server named `buoy`, so you can say "refactor this selection" without pasting code.
+- Enriches every prompt you submit with a snapshot of the live editor state (cwd, current file, cursor, visual selection, and open buffers) through a `UserPromptSubmit` hook, and gives the agent a private, session-scoped CLI to read buffer ranges and diagnostics or move the cursor mid-turn — so you can say "refactor this selection" without pasting code.
 
-The plugin is installed at `/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim`, a system runtime path that is not under `$HOME`. This keeps it active even in `dev`, `dev-init`, and `dev-sign`, where the host `~/.config/nvim` and `~/.local/share/nvim` are mounted read-only over the container home. A managed sibling file initializes the plugin on startup, selecting Codex in `dev` and Claude Code in `devil` to match each mode's default agent.
+The plugin is installed at `/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim`, a system runtime path that is not under `$HOME`. This keeps it active even in `dev`, where the host `~/.config/nvim` and `~/.local/share/nvim` are mounted read-only over the container home. A managed sibling file initializes the plugin on startup, selecting Claude Code in `dev` and Codex in `devil` to match each mode's default agent. `devil` sets `DEVTAINER_AGENT=codex` in its launcher; set that variable yourself to override the agent in either mode.
 
-The MCP context bridge is registered through the managed `codex` and `claude` wrappers, not by editing your config:
-
-- `codex` adds `-c mcp_servers.buoy=...` overrides.
-- `claude` adds `--mcp-config /usr/local/share/devtainer/buoy.mcp.json`.
-
-Because the bridge discovers the running Neovim through a lockfile, an agent run in a separate tmux pane (if you split the window yourself) can read editor state from Neovim, not only from the in-editor popup.
-
-The wrappers also teach the agent to *use* that context, following [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim)'s recommended instructions. The shared guidance lives at `/usr/local/share/devtainer/buoy-agents.md`. Claude Code receives it through the wrapper's `--append-system-prompt`, so `~/.claude.json` is never modified. Codex reads it from an `AGENTS.md` that the entrypoint seeds in `$CODEX_HOME` (`~/.codex`); that file carries a `Managed by devtainer.` marker and is only (re)written when absent or previously managed, so a global `AGENTS.md` of your own is never clobbered.
+buoy.nvim doesn't use an MCP server: it wires up the prompt hook, the private CLI, and its own agent instructions itself when it launches the agent, so the `codex` and `claude` wrappers carry no buoy-specific flags and nothing is seeded into `~/.codex` or `~/.claude.json`. The entrypoint removes the `AGENTS.md` guidance file that older devtainer images seeded into `$CODEX_HOME` (only the copy carrying the `Managed by devtainer.` marker; a file of your own is never touched).
 
 ## Host Mounts
 
@@ -211,22 +190,17 @@ The launchers mount only a small set of host paths.
 
 ```text
 $PWD                           -> /workspace
-~/.codex                       -> ~/.codex
+~/.claude                      -> ~/.claude
+~/.claude.json                 -> ~/.claude.json
 ~/.gitconfig                   -> ~/.gitconfig:ro
 ~/.gitmessage                  -> ~/.gitmessage:ro
 ~/.config/nvim                 -> ~/.config/nvim:ro
-```
-
-`dev-init` mounts:
-
-```text
-$PWD                           -> /workspace
 ~/.cache/devtainer/pre-commit  -> ~/.cache/pre-commit
 ~/.cache/devtainer/npm         -> ~/.cache/npm
 ~/.cache/devtainer/pip         -> ~/.cache/pip
-~/.gitconfig                   -> ~/.gitconfig:ro
-~/.gitmessage                  -> ~/.gitmessage:ro
-~/.config/nvim                 -> ~/.config/nvim:ro
+$(gpgconf --list-dirs agent-extra-socket) -> ~/.gnupg/S.gpg-agent, when available
+~/.gnupg/pubring.kbx           -> ~/.gnupg/pubring.kbx:ro, when present
+~/.gnupg/trustdb.gpg           -> ~/.gnupg/trustdb.gpg:ro, when present
 ```
 
 `devil` mounts:
@@ -236,22 +210,9 @@ $PWD                           -> /workspace
 devil-<host username>           -> /home, as a Docker named volume
 ```
 
-`dev-sign` mounts:
+Pre-commit normally stores hook environments in `~/.cache/pre-commit`, or in `PRE_COMMIT_HOME` when that variable is set. `dev` sets `PRE_COMMIT_HOME=~/.cache/pre-commit` inside the container and backs it with the dedicated host directory `~/.cache/devtainer/pre-commit`, so hook environments persist across throwaway container runs.
 
-```text
-$PWD                           -> /workspace
-~/.cache/devtainer/pre-commit  -> ~/.cache/pre-commit
-~/.gitconfig                   -> ~/.gitconfig:ro
-~/.gitmessage                  -> ~/.gitmessage:ro
-~/.config/nvim                 -> ~/.config/nvim:ro
-$(gpgconf --list-dirs agent-extra-socket) -> ~/.gnupg/S.gpg-agent
-~/.gnupg/pubring.kbx           -> ~/.gnupg/pubring.kbx:ro, when present
-~/.gnupg/trustdb.gpg           -> ~/.gnupg/trustdb.gpg:ro, when present
-```
-
-Pre-commit normally stores hook environments in `~/.cache/pre-commit`, or in `PRE_COMMIT_HOME` when that variable is set. `dev-init` and `dev-sign` set `PRE_COMMIT_HOME=~/.cache/pre-commit` inside the container and back it with the dedicated host directory `~/.cache/devtainer/pre-commit`. Use `dev-init` to initialize or update hook environments because it has network access; `dev-sign` can only reuse hook environments that are already present.
-
-`dev-init` also sets `NPM_CONFIG_CACHE=~/.cache/npm` and `PIP_CACHE_DIR=~/.cache/pip` inside the container, backed by dedicated host directories under `~/.cache/devtainer`. This avoids reinstalling dependency artifacts on every throwaway container run without mounting the host's broader `~/.cache`.
+`dev` also sets `NPM_CONFIG_CACHE=~/.cache/npm` and `PIP_CACHE_DIR=~/.cache/pip` inside the container, backed by dedicated host directories under `~/.cache/devtainer`. This avoids reinstalling dependency artifacts on every throwaway container run without mounting the host's broader `~/.cache`.
 
 To reset cached dependency environments:
 
@@ -259,9 +220,7 @@ To reset cached dependency environments:
 rm -rf ~/.cache/devtainer/pre-commit ~/.cache/devtainer/npm ~/.cache/devtainer/pip
 ```
 
-`dev` and `dev-init` do not mount the host GPG agent socket or private GPG key files.
-
-`dev-sign` mounts the host GPG agent extra socket into the container at `~/.gnupg/S.gpg-agent`, but it does not mount private GPG key files. In particular, `~/.gnupg/private-keys-v1.d` is not mounted.
+`dev` mounts the host GPG agent extra socket into the container at `~/.gnupg/S.gpg-agent`, but it does not mount private GPG key files. In particular, `~/.gnupg/private-keys-v1.d` is not mounted, so the private key stays on the host and signing happens in the host agent over the socket.
 
 ## Git Signing
 
@@ -277,41 +236,45 @@ Confirm the extra socket exists:
 gpgconf --list-dirs agent-extra-socket
 ```
 
-Inside the no-network signing container, configure Git signing if your mounted `~/.gitconfig` does not already do so:
+Inside `dev`, configure Git signing if your mounted `~/.gitconfig` does not already do so:
 
 ```bash
-dev-sign git config user.signingkey YOUR_KEY_ID
-dev-sign git config commit.gpgsign true
-dev-sign git config gpg.program gpg
+dev git config user.signingkey YOUR_KEY_ID
+dev git config commit.gpgsign true
+dev git config gpg.program gpg
 ```
 
 Verify GPG signing:
 
 ```bash
-dev-sign bash -lc "printf 'test\n' | gpg --local-user YOUR_KEY_ID --clearsign"
+dev bash -lc "printf 'test\n' | gpg --local-user YOUR_KEY_ID --clearsign"
 ```
 
 Verify Git signing:
 
 ```bash
-dev-sign git commit --allow-empty -S -m "test signed commit"
-dev-sign git log -1 --show-signature
+dev git commit --allow-empty -S -m "test signed commit"
+dev git log -1 --show-signature
 ```
 
 ## Security Model
 
-This setup is designed so pre-commit hooks and package installers run in the container, not directly on the host.
+This setup is designed so pre-commit hooks and package installers run in the container, not directly on the host. The container limits the blast radius of a supply-chain attack or prompt injection to what is explicitly mounted; anything not on the mount list stays out of reach.
 
-Important boundaries:
+`dev` is a single container that runs untrusted code (npm installs, pre-commit hooks) alongside your Claude Code credentials and GPG signing socket. Understand what that co-location exposes.
 
-- The container does not receive your private GPG key files.
-- The host GPG agent socket is mounted only by `dev-sign`.
-- `dev-sign` runs with Docker networking disabled.
-- `dev-init` persists downloaded pre-commit, npm, and pip cache data across container runs. `dev-sign` also mounts the pre-commit cache so warmed hooks can run offline during commits. This is a speed and ergonomics tradeoff; malicious install code could persist there until the caches are deleted.
-- `dev` mounts `~/.codex` read-write because Codex needs its config/auth state. Treat it as sensitive.
-- `dev` does not mount host dependency caches.
-- `dev-init` does not mount `~/.codex`.
-- The current repository is mounted read-write so development commands can edit files.
+Still protected — never mounted into any container:
+
+- Private GPG key files. Signing uses the host GPG agent over its extra socket; `~/.gnupg/private-keys-v1.d` is not mounted, so the private key never leaves the host and cannot be extracted.
+- SSH keys, cloud credentials (`~/.aws`, `~/.config/gcloud`, and similar), and everything else in your host home outside the explicit mount list.
+- Any repository or file outside the current directory (`$PWD`).
+
+Exposed to code running in `dev` — treat as reachable by a compromised dependency or injected prompt:
+
+- `~/.claude` and `~/.claude.json`, mounted read-write because Claude Code needs its config/auth state. A malicious process in `dev` can read and, with network access, exfiltrate these. Treat them as sensitive, and rotate Claude credentials if you suspect compromise.
+- The GPG agent extra socket. The extra socket restricts key-management operations, but a compromised process can still ask the agent to produce signatures while the socket is mounted.
+- The pre-commit, npm, and pip caches, which persist across container runs. Malicious install code could persist there until the caches are deleted.
+- The current repository, mounted read-write so development commands can edit files.
 
 If an old alias or shell function shadows `~/bin/dev`, remove it:
 
@@ -326,16 +289,4 @@ type -a dev
 
 ```text
 ~/bin/dev
-```
-
-`type -a dev-init` should resolve to:
-
-```text
-~/bin/dev-init
-```
-
-`type -a dev-sign` should resolve to:
-
-```text
-~/bin/dev-sign
 ```
