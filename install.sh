@@ -6,7 +6,7 @@ IMAGE_NAME="${IMAGE_NAME:-devtainer:26.04}"
 build_flags=()
 
 usage() {
-  cat <<EOF
+  cat << EOF
 Usage: ${0##*/} [--no-cache]
 
   --no-cache   Build the image without using Docker's layer cache. Use this to
@@ -67,7 +67,8 @@ touch "${HOME}/.gitmessage"
 touch "${HOME}/.tmux.conf"
 touch "${HOME}/.claude.json"
 
-DEFAULT_COMMAND_SCRIPT=$(cat <<'SCRIPT'
+DEFAULT_COMMAND_SCRIPT=$(
+  cat << 'SCRIPT'
 if [[ $# -eq 0 ]]; then
   set -- nvim .
 fi
@@ -76,12 +77,28 @@ SCRIPT
 
 DEVIL_COMMAND_SCRIPT="${DEFAULT_COMMAND_SCRIPT}"
 
+# Prefer the host gh login unless a named devtainer token was requested.
+GH_CONFIG_ARGS_SCRIPT=$(
+  cat << 'SCRIPT'
+host_gh_config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+if [[ "${github_explicit:-false}" != true && -d "$host_gh_config" ]]; then
+  # Clear the implicit default token so it cannot shadow the host login.
+  github_args=()
+  docker_args+=(
+    -v "$host_gh_config:$HOME/.config/gh:ro"
+    -e "GH_CONFIG_DIR=$HOME/.config/gh"
+  )
+fi
+SCRIPT
+)
+
 # Mount the host Wayland compositor socket so clipboard tools inside the
 # container (wl-copy/wl-paste, used by Neovim's clipboard provider) talk to
 # the host clipboard. WAYLAND_DISPLAY is set to an absolute path (supported
 # by libwayland) so XDG_RUNTIME_DIR stays untouched inside the container.
 # Skipped silently when no Wayland session is present.
-WAYLAND_ARGS_SCRIPT=$(cat <<'SCRIPT'
+WAYLAND_ARGS_SCRIPT=$(
+  cat << 'SCRIPT'
 host_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 host_wayland_socket="${host_runtime_dir}/${WAYLAND_DISPLAY:-}"
 if [[ "${WAYLAND_DISPLAY:-}" == /* ]]; then
@@ -100,7 +117,8 @@ SCRIPT
 # tags can be signed inside the container using the host GPG agent. Private key
 # files are never mounted; signing runs in the host agent over the extra socket.
 # Skipped with a warning when the agent's extra socket is not available.
-GPG_ARGS_SCRIPT=$(cat <<'SCRIPT'
+GPG_ARGS_SCRIPT=$(
+  cat << 'SCRIPT'
 gpg_dir="$HOME/.gnupg"
 container_agent_socket="$gpg_dir/S.gpg-agent"
 host_extra_socket="$(gpgconf --list-dirs agent-extra-socket 2>/dev/null || true)"
@@ -150,6 +168,8 @@ docker_args=(
   -v "${CACHE_DIR}:\$HOME/.cache"
 )
 
+${GH_CONFIG_ARGS_SCRIPT}
+
 ${WAYLAND_ARGS_SCRIPT}
 
 ${GPG_ARGS_SCRIPT}
@@ -183,6 +203,8 @@ docker_args=(
   -v "\$volume_name:/home"
   -v "\$PWD:${WORK_DIR}"
 )
+
+${GH_CONFIG_ARGS_SCRIPT}
 
 ${WAYLAND_ARGS_SCRIPT}
 

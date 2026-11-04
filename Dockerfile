@@ -46,6 +46,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         fd-find \
+        gh \
         git \
         gnupg \
         jq \

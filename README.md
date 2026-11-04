@@ -182,6 +182,19 @@ The plugin is installed at `/usr/local/share/nvim/site/pack/devtainer/start/buoy
 
 buoy.nvim doesn't use an MCP server: it wires up the prompt hook, the private CLI, and its own agent instructions itself when it launches the agent, so the `codex` and `claude` wrappers carry no buoy-specific flags and nothing is seeded into `~/.codex` or `~/.claude.json`. The entrypoint removes the `AGENTS.md` guidance file that older devtainer images seeded into `$CODEX_HOME` (only the copy carrying the `Managed by devtainer.` marker; a file of your own is never touched).
 
+## Host GitHub CLI Configuration
+
+Both `dev` and `devil` mount your host `~/.config/gh` read-only when it
+exists, so `gh` can reuse your host login and settings. Host `GH_CONFIG_DIR`
+and `XDG_CONFIG_HOME` overrides are respected. Run `./install.sh`
+on the host to regenerate both launchers, then start a new container.
+
+The mounted login has the same GitHub permissions as on the host. Read-only
+mounting prevents config changes; it does not restrict GitHub API access.
+If your host login stores its token in an OS keyring, the config mount alone
+cannot provide that token inside the container. Login and account changes
+should be made on the host.
+
 ## Host Mounts
 
 The launchers mount only a small set of host paths.
