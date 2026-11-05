@@ -63,17 +63,7 @@ class GitHubAuthTest(unittest.TestCase):
                        ALL_PROXY="http://127.0.0.1:9", NO_PROXY="")
             for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_DEBUG"):
                 env.pop(key, None)
-            # Without a version marker, status migrates even a complete hosts.yml.
             hosts.chmod(0o400)
-            config.chmod(0o500)
-            try:
-                result = subprocess.run(
-                    ["gh", "auth", "status", "--hostname", "github.com"],
-                    env=env, capture_output=True, text=True, timeout=10,
-                )
-                self.assertIn("failed to write config after migration", result.stderr)
-            finally:
-                config.chmod(0o700)
             schema = config / "config.yml"
             schema.write_text("version: 1\n")
             schema.chmod(0o400)

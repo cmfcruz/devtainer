@@ -184,6 +184,10 @@ buoy.nvim doesn't use an MCP server: it wires up the prompt hook, the private CL
 
 ## Host GitHub CLI Configuration
 
+The image installs GitHub CLI `2.103.3` from its pinned upstream release, with
+SHA-256 verification for both amd64 and arm64. Rebuild with `bash install.sh`
+to update the CLI; regenerating launchers alone does not update the image.
+
 Both `dev` and `devil` require a saved host GitHub CLI login for `github.com`.
 At each launch, host `gh config get user --host github.com` selects the active
 account, then `gh auth token --hostname github.com --user <account>` retrieves its

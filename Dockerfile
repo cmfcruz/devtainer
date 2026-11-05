@@ -16,6 +16,9 @@ ARG PYTHON_VERSION=3.12.13
 ARG PIP_VERSION=26.1.1
 ARG PRE_COMMIT_VERSION=4.6.0
 ARG SAFE_CHAIN_VERSION=1.5.3
+ARG GH_VERSION=2.103.3
+ARG GH_AMD64_SHA256=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+ARG GH_ARM64_SHA256=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 ARG YQ_VERSION=v4.53.2
 ARG ACTIONLINT_VERSION=1.7.12
 ARG STYLUA_VERSION=2.5.2
@@ -46,7 +49,6 @@ RUN apt-get update \
         ca-certificates \
         curl \
         fd-find \
-        gh \
         git \
         gnupg \
         jq \
@@ -75,6 +77,23 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Install GitHub CLI from its pinned upstream release instead of Ubuntu's package.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) gh_sha256="${GH_AMD64_SHA256}" ;; \
+        arm64) gh_sha256="${GH_ARM64_SHA256}" ;; \
+        *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    gh_release="gh_${GH_VERSION}_linux_${arch}"; \
+    gh_archive="${gh_release}.tar.gz"; \
+    curl -fsSLo "/tmp/${gh_archive}" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_archive}"; \
+    echo "${gh_sha256}  /tmp/${gh_archive}" | sha256sum -c -; \
+    tar -xzf "/tmp/${gh_archive}" -C /tmp "${gh_release}/bin/gh"; \
+    install -m 0755 "/tmp/${gh_release}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "/tmp/${gh_archive}" "/tmp/${gh_release}"; \
+    gh --version
 
 # Install CLI tools from pinned upstream releases, verifying each
 # downloaded artifact against the release checksum files.
