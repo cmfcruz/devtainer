@@ -51,7 +51,9 @@ class HostGhConfigTest(unittest.TestCase):
             'hosts = source / "hosts.yml"\n'
             'data = {"args": args, "source": str(source), "config": hosts.read_text(), '
             '"dir_mode": source.stat().st_mode & 0o777, '
-            '"file_mode": hosts.stat().st_mode & 0o777}\n'
+            '"file_mode": hosts.stat().st_mode & 0o777, '
+            '"schema": (source / "config.yml").read_text(), '
+            '"schema_mode": (source / "config.yml").stat().st_mode & 0o777}\n'
             'Path(os.environ["HOME"], "docker.json").write_text(json.dumps(data))\n'
             'if os.environ.get("TEST_WAIT"): time.sleep(30)\n'
             'sys.exit(int(os.environ.get("TEST_DOCKER_EXIT", "0")))\n'
@@ -92,6 +94,8 @@ class HostGhConfigTest(unittest.TestCase):
                     self.assertIn(f"GH_CONFIG_DIR={target}", data["args"])
                     self.assertEqual(data["dir_mode"], 0o700)
                     self.assertEqual(data["file_mode"], 0o600)
+                    self.assertEqual(data["schema_mode"], 0o600)
+                    self.assertEqual(data["schema"], "version: 1\n")
                     self.assertEqual(data["config"], f'github.com:\n    user: "test-user"\n    oauth_token: "{TOKEN}"\n    git_protocol: https\n    users:\n        "test-user":\n            oauth_token: "{TOKEN}"\n')
                     self.assertNotIn(str(host_config), " ".join(data["args"]))
                     self.assertNotIn(TOKEN, result.stdout + result.stderr + " ".join(data["args"]))

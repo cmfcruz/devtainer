@@ -127,6 +127,8 @@ if [[ ! "$gh_token" =~ ^[a-zA-Z0-9_]+$ ]]; then
   exit 1
 fi
 (umask 077; printf 'github.com:\n    user: "%s"\n    oauth_token: "%s"\n    git_protocol: https\n    users:\n        "%s":\n            oauth_token: "%s"\n' "$gh_user" "$gh_token" "$gh_user" "$gh_token" > "$gh_config_tmp/hosts.yml")
+# gh auth status migrates configs without a schema marker, even with users set.
+(umask 077; printf 'version: 1\n' > "$gh_config_tmp/config.yml")
 unset gh_token gh_user
 docker_args+=(
   --mount "type=bind,source=$gh_config_tmp,target=$container_gh_config,readonly"

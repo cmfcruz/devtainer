@@ -27,6 +27,7 @@ class GitHubAuthTest(unittest.TestCase):
                         f"    git_protocol: https\n    users:\n        test-user:\n"
                         f"            oauth_token: {stored}\n")
             hosts.write_text(original)
+            (config / "config.yml").write_text("version: 1\n")
             # A persistent devil home can reload tokens after Docker starts.
             (home / ".devtainer-env").write_text(
                 "export GH_TOKEN=stale-home-token\nexport GITHUB_TOKEN=stale-home-token\nexport GH_CONFIG_DIR=/wrong/config\n"
@@ -42,6 +43,53 @@ class GitHubAuthTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), stored)
             self.assertEqual(hosts.read_text(), original)
+
+
+    @unittest.skipUnless(shutil.which("gh"), "GitHub CLI is required")
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permission restrictions")
+    def test_auth_status_accepts_config_without_write_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "gh"
+            config.mkdir()
+            hosts = config / "hosts.yml"
+            hosts.write_text(
+                'github.com:\n    user: test-user\n'
+                '    oauth_token: gho_FAKE_TEST_CREDENTIAL\n'
+                '    git_protocol: https\n    users:\n        test-user:\n'
+                '            oauth_token: gho_FAKE_TEST_CREDENTIAL\n'
+            )
+            env = dict(os.environ, GH_CONFIG_DIR=str(config),
+                       HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9",
+                       ALL_PROXY="http://127.0.0.1:9", NO_PROXY="")
+            for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_DEBUG"):
+                env.pop(key, None)
+            # Without a version marker, status migrates even a complete hosts.yml.
+            hosts.chmod(0o400)
+            config.chmod(0o500)
+            try:
+                result = subprocess.run(
+                    ["gh", "auth", "status", "--hostname", "github.com"],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertIn("failed to write config after migration", result.stderr)
+            finally:
+                config.chmod(0o700)
+            schema = config / "config.yml"
+            schema.write_text("version: 1\n")
+            schema.chmod(0o400)
+            original = {p.name: p.read_bytes() for p in config.iterdir()}
+            config.chmod(0o500)
+            try:
+                result = subprocess.run(
+                    ["gh", "auth", "status", "--hostname", "github.com"],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                # The fake token cannot authenticate; config loading must still work.
+                self.assertNotIn("migration", result.stderr)
+                self.assertNotIn("permission denied", result.stderr)
+                self.assertEqual({p.name: p.read_bytes() for p in config.iterdir()}, original)
+            finally:
+                config.chmod(0o700)
 
 
 if __name__ == "__main__":

@@ -194,7 +194,9 @@ token stops the launcher before starting the container. Retrieval does not check
 whether GitHub has expired or revoked the credential.
 
 The launcher creates a unique directory under `${TMPDIR:-/tmp}` with mode `700`
-and writes a minimal `hosts.yml` with mode `600`. Only this directory is mounted,
+and writes minimal `hosts.yml` and `config.yml` files with mode `600`.
+`config.yml` declares schema version `1` so `gh` does not try to migrate the
+read-only config on startup. Only this directory is mounted,
 read-only, at `/home/<build username>/.config/gh` inside the container. The host
 config directory and OS keyring are not mounted. The temporary config includes
 only the active `github.com` token and selects HTTPS for `gh` Git operations;
