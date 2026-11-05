@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     -h | --help)
       printf '%s\n' 'Usage: dev [--session NAME] [setup-github | reset-home | command ...]' \
         'Default session: dev. No command opens a directory-named tmux session.' \
-        'setup-github saves the selected session GitHub token.' \
+        'setup-github [ACCOUNT] binds this session to a saved host gh account.' \
         'reset-home deletes the selected session home after confirmation.'
       exit 0
       ;;
@@ -94,7 +94,7 @@ if [[ "${1:-}" == reset-home ]]; then
     exit 1
   fi
   printf 'Reset session "%s": delete volume %s, including logins, settings, caches, and home-installed tools.\n' "$dev_session" "$volume_name"
-  printf 'The workspace and the session\x27s saved GitHub profile are kept.\n'
+  printf 'The workspace and the session\x27s GitHub account binding are kept.\n'
   if [[ ! -t 0 ]]; then
     printf 'reset-home requires an interactive terminal for confirmation.\n' >&2
     exit 1

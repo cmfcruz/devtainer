@@ -39,7 +39,7 @@ That lets `dev claude` run in auto mode, which uses a classifier to skip prompts
 ## Install
 
 The host needs Linux, Bash 4+, Docker, and `flock` (util-linux). Host `gh` is also
-needed for GitHub setup. The image uses the builder's username, UID, and GID.
+needed for GitHub setup and container launches. The image uses the builder's username, UID, and GID.
 
 ```bash
 bash install.sh
@@ -99,64 +99,68 @@ The bundled buoy.nvim plugin defaults to Claude Code for all sessions. Use
 `DEVTAINER_AGENT` in that session's home environment. Claude Code and Codex are
 available directly in every session.
 
-## Dedicated Read-only GitHub Access
+## GitHub Access Through Host gh
 
-GitHub profiles follow the selected session. The default and personal session
-must each be configured independently, even if they previously used `devil`:
+Dev retrieves GitHub credentials through the host's saved `gh` login and keyring.
+No personal access token creation or token pasting is needed. Sign in to the
+accounts you need using `gh auth login --hostname github.com` on the host.
+
+Bind each session to a host account once:
 
 ```bash
-dev setup-github
-dev --session personal setup-github
+dev setup-github                         # bind dev to the host's active account
+dev --session personal setup-github YOUR_PERSONAL_USERNAME
 ```
 
-Setup runs on the host without Docker. It opens a token form with a 30-day
-expiration and **Contents**, **Actions**, and **Pull requests** set to **Read-only**.
-Choose the resource owner and selected repositories. Metadata read is included.
-The form can be edited: grant no write permissions. Setup validates token format
-and account login, not its permissions. GitHub enforces the actual grants.
-See [GitHub's fine-grained token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
-
-Paste the token at the hidden prompt. Host `gh` validates it through an isolated
-temporary config, without changing your normal login. A failed validation or
-cancelled prompt preserves the saved profile. If a browser cannot open, use the
-printed URL. A fine-grained token covers one resource owner; organization approval
-may be required even after the login check succeeds.
-
-The profile is stored on the host at:
+An explicit username selects an account already saved in host `gh`, without
+switching the host's active account. Omitting it selects the currently active
+host account. Setup checks that `gh` can retrieve that account's token, then
+atomically saves only its username at:
 
 ```text
-~/.config/devtainer/sessions/<session>/github.credential
+~/.config/devtainer/sessions/<session>/github.account
 ```
 
-The session directory is mode `700`, and the credential file is mode `600`. Account
-and token are replaced atomically together. The old `--github-token` option and
-positional profile names are removed; use `--session` for all session selection.
-Old `github/*.credential` and `*.token` files are never used as fallbacks.
+The session directory is mode `700` and the account file mode `600`. Setup runs
+without Docker or a terminal prompt and leaves an existing binding unchanged if
+retrieval fails. It does not create a second permanent token store or modify the
+host login. Old PAT `*.credential` and `*.token` files are left untouched and are
+not read; rerun setup to save the account binding.
 
-At launch, only that session's credential is copied into a temporary directory
-(mode `700`), containing `hosts.yml` and `config.yml` (mode `600`). Schema version
-`1` prevents configuration migration on the read-only mount. This directory is
-mounted at the container user's `~/.config/gh`, and `GH_CONFIG_DIR` points there.
-The host gh config, keyring, and persistent profile store are not mounted.
+Each launch uses `gh auth token --hostname github.com --user <bound-account>`.
+Switching the host's active account does not change an existing session's binding.
+A missing binding or unavailable credential fails launch; dev never substitutes
+another session or active account. Host `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`
+are respected; `GH_TOKEN`, `GITHUB_TOKEN`, and `GH_DEBUG` overrides are removed
+from the host retrieval subprocess. Local retrieval does not validate expiration
+or repository access with GitHub. See [gh auth token](https://cli.github.com/manual/gh_auth_token).
 
-Credentials are not passed through Docker arguments or token environment
-variables. Shell tracing is disabled during credential handling. Missing, unsafe,
-or malformed profiles stop launch; another session or the host's full-access login
-is never used instead. Normal launches require neither host `gh` nor API access.
-The entrypoint clears initial token overrides after loading its home environment.
-Later interactive shell configuration can still override environment settings.
+**The container receives the host credential's full permissions.** A read-only
+mount does not make GitHub access read-only. Code in the container can read and
+copy the credential, read permitted private data, and perform writes allowed by
+that token. The host account's organization and SSO policies still apply.
+
+The token is copied into a temporary directory (mode `700`), containing
+`hosts.yml` and `config.yml` (mode `600`). Schema version `1` prevents config
+migration on the read-only mount. The directory is mounted at the container
+user's `~/.config/gh`, and `GH_CONFIG_DIR` points there. The host gh configuration,
+keyring, and session account-binding files are not mounted.
+
+Tokens are not passed through Docker arguments or token environment variables.
+Shell tracing is disabled during retrieval and writing. The entrypoint clears
+initial token overrides after loading its home environment; later interactive
+shell configuration can still change environment settings.
 
 Temporary snapshots are removed after exit, Docker failure, and handled HUP, INT,
 and TERM signals. SIGKILL or a host crash can leave plaintext snapshots under
 `${TMPDIR:-/tmp}`. Remove leftovers after their containers stop. The temporary root
 must be available to a local Docker daemon and outside the project mount. A
-workspace containing the persistent credential store is also rejected.
+workspace exposing the host gh config or session account configuration is rejected.
 
-Rotate a profile by running setup again, then start a new container. Deleting its
-host file prevents future use; revoke it on GitHub to invalidate running copies.
-Resetting a home keeps its host profile. An exposed PAT or private repository data
-can still be copied by container code; read-only grants restrict GitHub writes,
-not reads or exfiltration.
+Host credential changes take effect on the next launch. Rebind an account by
+running setup again. Removing the account from host `gh` prevents new retrieval;
+revoke the credential on GitHub to invalidate existing snapshots. Resetting a
+home keeps the session's account binding.
 
 GitHub CLI `2.103.3` is installed from the pinned upstream release with SHA-256
 verification for amd64 and arm64. Check access with:
@@ -176,7 +180,7 @@ dev --session personal reset-home
 The command displays the exact volume and requires typing the selected session
 name in an interactive terminal. It deletes that volume's logins, shell state,
 settings, caches, and home-installed tools. The next launch initializes a fresh
-home from the image. The host GitHub profile and mounted project files are kept.
+home from the image. The host account binding and mounted project files are kept.
 A missing home volume is already reset and requires no confirmation.
 
 Reset refuses homes used by another launcher or attached to any Docker container,
@@ -230,7 +234,7 @@ loaded profile, but its restrictions may prevent Claude's nested sandbox working
 
 These are separate home environments, not complete isolation from the host or
 from each other. All sessions use the same image and host kernel, can reach the
-network, can access their dedicated GitHub credential, and can change the mounted
+network, can access their selected host GitHub credential, and can change the mounted
 workspace. The host Wayland socket is shared when available. A malicious process
 can persist inside its session home until reset.
 

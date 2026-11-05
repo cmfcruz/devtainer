@@ -10,8 +10,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-TOKEN = "github_pat_FAKE_TEST_CREDENTIAL"
-PERSONAL_TOKEN = "github_pat_FAKE_PERSONAL_CREDENTIAL"
+TOKEN = "gho_FAKE_OFFICE_CREDENTIAL"
+PERSONAL_TOKEN = "gho_FAKE_PERSONAL_CREDENTIAL"
 
 DOCKER = r'''#!/usr/bin/env python3
 import json, os, re, sys, time
@@ -76,15 +76,21 @@ class HostGhConfigTest(unittest.TestCase):
         gh = self.fake_bin / "gh"
         gh.write_text(
             '#!/usr/bin/env python3\n'
-            'import os, sys\nfrom pathlib import Path\n'
-            'assert "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ\n'
-            'assert sys.argv[1:] == ["api", "--hostname", "github.com", "user", "--jq", ".login"]\n'
-            'config = Path(os.environ["GH_CONFIG_DIR"])\n'
-            'assert (config / "config.yml").read_text() == "version: 1\\n"\n'
-            'assert "github_pat_" in (config / "hosts.yml").read_text()\n'
-            'Path(os.environ["HOME"], "gh.json").write_text("called")\n'
-            'print(os.environ.get("TEST_USER", "test-user"))\n'
-            'sys.exit(int(os.environ.get("TEST_GH_EXIT", "0")))\n'
+            'import json, os, sys\nfrom pathlib import Path\n'
+            'assert not any(k in os.environ for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_DEBUG"))\n'
+            'home = Path(os.environ["HOME"])\n'
+            'with (home / "gh-calls.jsonl").open("a") as log:\n'
+            '    log.write(json.dumps({"args": sys.argv[1:], "config": os.environ.get("GH_CONFIG_DIR")}) + "\\n")\n'
+            'if os.environ.get("TEST_GH_EXIT"): sys.exit(int(os.environ["TEST_GH_EXIT"]))\n'
+            'state = json.loads((home / "host-accounts.json").read_text())\n'
+            'if sys.argv[1:] == ["config", "get", "user", "--host", "github.com"]:\n'
+            '    print(state["active"])\n'
+            'else:\n'
+            '    assert sys.argv[1:5] == ["auth", "token", "--hostname", "github.com"]\n'
+            '    assert sys.argv[5] == "--user"\n'
+            '    token = state["tokens"].get(sys.argv[6])\n'
+            '    if token is None: sys.exit(1)\n'
+            '    print(os.environ.get("TEST_TOKEN", token))\n'
         )
         gh.chmod(0o755)
         docker = self.fake_bin / "docker"
@@ -101,17 +107,22 @@ class HostGhConfigTest(unittest.TestCase):
         self.calls = self.home / "docker-calls.jsonl"
         self.state_file = self.home / "docker-state.json"
         self.store = self.profile_dir("dev")
-        self.credential = self.seed_profile("dev", TOKEN)
-        self.seed_profile("personal", PERSONAL_TOKEN)
+        self.credential = self.seed_profile("dev", "office-user")
+        self.seed_profile("personal", "personal-user")
+        self.gh_calls = self.home / "gh-calls.jsonl"
+        self.host_accounts = self.home / "host-accounts.json"
+        self.host_accounts.write_text(json.dumps({"active": "office-user", "tokens": {
+            "office-user": TOKEN, "personal-user": PERSONAL_TOKEN,
+        }}))
 
     def profile_dir(self, session):
         return self.home / ".config/devtainer/sessions" / session
 
-    def seed_profile(self, session, token):
+    def seed_profile(self, session, account):
         store = self.profile_dir(session)
         store.mkdir(parents=True, mode=0o700, exist_ok=True)
-        path = store / "github.credential"
-        path.write_text(f"test-user\n{token}\n")
+        path = store / "github.account"
+        path.write_text(account + "\n")
         path.chmod(0o600)
         return path
 
@@ -147,7 +158,10 @@ class HostGhConfigTest(unittest.TestCase):
                 other = PERSONAL_TOKEN if session == "dev" else TOKEN
                 self.assertNotIn(other, data["config"])
                 self.assertNotIn(token, result.stdout + result.stderr + " ".join(data["args"]))
-                self.assertFalse((self.home / "gh.json").exists())
+                account = "office-user" if session == "dev" else "personal-user"
+                calls = [json.loads(line)["args"] for line in self.gh_calls.read_text().splitlines()]
+                self.assertEqual(calls[-1], ["auth", "token", "--hostname", "github.com", "--user", account])
+                self.assertEqual((self.profile_dir(session) / "github.account").read_text(), account + "\n")
                 mounts = [data['args'][i+1] for i, a in enumerate(data['args']) if a == '-v']
                 self.assertEqual(mounts, [f"{self.volume(session)}:/home", f"{self.work}:/workspace"])
                 self.assert_clean()
@@ -161,28 +175,59 @@ class HostGhConfigTest(unittest.TestCase):
         (legacy / "default.credential").chmod(0o600)
         (legacy / "default.token").write_text(TOKEN + "\n")
         for session in ("dev", "personal"):
-            path = self.profile_dir(session) / "github.credential"
+            path = self.profile_dir(session) / "github.account"
             original = path.read_bytes()
             path.unlink()
             result = self.launch(session)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(f"--session {session} setup-github", result.stderr)
             self.assertFalse(self.log.exists())
-            self.assertFalse((self.home / "gh.json").exists())
+            self.assertFalse(self.gh_calls.exists())
             path.write_bytes(original)
             path.chmod(0o600)
             self.assert_clean()
 
-    def test_malformed_credentials_and_unsafe_permissions_fail_closed(self):
-        for content in ("", "test-user\nghp_CLASSIC\n", "test-user\ngithub_pat_BAD;yaml\n", "bad: user\n" + TOKEN + "\n"):
+    def test_malformed_binding_and_unsafe_permissions_fail_closed(self):
+        for content in ("", "office-user\npersonal-user\n", "bad: user\n", TOKEN + "\n"):
             self.credential.write_text(content)
             result = self.launch()
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(self.log.exists())
+            self.assertFalse(self.gh_calls.exists())
             self.assert_clean()
-        self.seed_profile("dev", TOKEN).chmod(0o644)
+        self.seed_profile("dev", "office-user").chmod(0o644)
         self.assertNotEqual(self.launch().returncode, 0)
         self.assertFalse(self.log.exists())
+
+    def test_failed_token_retrieval_never_falls_back(self):
+        for overrides in ({"TEST_GH_EXIT": "1"}, {"TEST_TOKEN": ""},
+                          {"TEST_TOKEN": "bad\n    yaml: injection"}):
+            result = self.launch(overrides=overrides)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.log.exists())
+            self.assertNotIn(TOKEN, result.stdout + result.stderr)
+            self.assert_clean()
+        state = json.loads(self.host_accounts.read_text())
+        del state["tokens"]["office-user"]
+        state["active"] = "personal-user"
+        self.host_accounts.write_text(json.dumps(state))
+        self.assertNotEqual(self.launch().returncode, 0)
+        self.assertFalse(self.log.exists())
+
+    def test_host_switch_and_rotation_preserve_session_account(self):
+        state = json.loads(self.host_accounts.read_text())
+        state["active"] = "personal-user"
+        state["tokens"]["office-user"] = TOKEN + "_ROTATED"
+        self.host_accounts.write_text(json.dumps(state))
+        result = self.launch(overrides={"GH_CONFIG_DIR": str(self.home / "custom gh config")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TOKEN + "_ROTATED", json.loads(self.log.read_text())["config"])
+        calls = [json.loads(line) for line in self.gh_calls.read_text().splitlines()]
+        self.assertEqual(calls[-1]["args"][-1], "office-user")
+        self.assertEqual(calls[-1]["config"], str(self.home / "custom gh config"))
+        self.assertEqual(self.credential.read_text(), "office-user\n")
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assert_clean()
 
     def test_workspace_cannot_expose_credentials(self):
         result = self.launch(overrides={"TMPDIR": str(self.work)})
@@ -192,7 +237,7 @@ class HostGhConfigTest(unittest.TestCase):
         result = subprocess.run([str(self.home / "bin/dev"), "true"], cwd=self.home,
                                 env=self.env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("credential store", result.stderr)
+        self.assertIn("host GitHub configuration", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_container_failure_preserves_status_and_cleans_up(self):

@@ -1,99 +1,66 @@
 # shellcheck shell=bash
 # Inputs supplied by the installer or preceding launcher fragments.
 : "${dev_session:?}" "${session_dir:?}"
-# Embedded in both host launchers. Never trace pasted or stored credentials.
+# Never trace credentials, including tokens retrieved through the host keyring.
 github_trace=false
-# Used by the embedded config-mount block in install.sh.
+# Used by the subsequent config-mount fragment.
 # shellcheck disable=SC2034
 [[ $- != *x* ]] || github_trace=true
 set +x
 
-github_name="$dev_session"
-github_setup=false
-if [[ "${1:-}" == setup-github ]]; then
-  github_setup=true
-  shift
-  if [[ $# -ne 0 ]]; then
-    printf 'Usage: dev [--session NAME] setup-github\n' >&2
-    exit 1
-  fi
-fi
+# Respect host config/keyring selection, but ignore credential env overrides.
+host_gh() (
+  unset GH_TOKEN GITHUB_TOKEN GH_DEBUG
+  command gh "$@"
+)
 
+github_name="$dev_session"
 github_dir="$session_dir"
-github_file="$github_dir/github.credential"
-if [[ "$github_setup" == true ]]; then
-  if [[ ! -t 0 ]]; then
-    printf 'setup-github needs an interactive terminal; token input is hidden.\n' >&2
+github_file="$github_dir/github.account"
+if [[ "${1:-}" == setup-github ]]; then
+  shift
+  if [[ $# -gt 1 ]]; then
+    printf 'Usage: dev [--session NAME] setup-github [ACCOUNT]\n' >&2
     exit 1
   fi
-  if ! command -v gh > /dev/null 2>&1; then
-    printf 'setup-github requires GitHub CLI (gh) on the host to validate the token.\n' >&2
+  if [[ $# -eq 1 ]]; then
+    github_user="$1"
+  elif ! github_user="$(host_gh config get user --host github.com 2> /dev/null)"; then
+    printf 'Cannot find the active host GitHub account. Run gh auth login --hostname github.com on the host, then setup-github again.\n' >&2
     exit 1
   fi
-  github_url='https://github.com/settings/personal-access-tokens/new?name=devtainer-read-only&expires_in=30&contents=read&actions=read&pull_requests=read'
-  printf 'Create a fine-grained token for the desired owner and selected repositories.\n'
-  printf 'Use only Contents, Actions, and Pull requests: Read-only; Metadata is included.\n'
-  printf 'The token form can be edited. Setup validates the login, not its permissions.\n%s\n' "$github_url"
-  if command -v xdg-open > /dev/null 2>&1 && xdg-open "$github_url" < /dev/null > /dev/null 2>&1; then
-    printf 'Opened the token form in your browser.\n'
-  elif command -v gio > /dev/null 2>&1 && gio open "$github_url" < /dev/null > /dev/null 2>&1; then
-    printf 'Opened the token form in your browser.\n'
-  elif [[ "$(uname -s)" == Darwin ]] && command -v open > /dev/null 2>&1 && open "$github_url" < /dev/null > /dev/null 2>&1; then
-    printf 'Opened the token form in your browser.\n'
-  else
-    printf 'Open the URL above manually if no browser opened.\n' >&2
-  fi
-  printf 'Saving the dedicated token for session "%s"; its existing token will be replaced.\n' "$github_name"
-  if ! IFS= read -rs -p 'Paste token (hidden; empty cancels): ' github_token; then
-    printf '\nCancelled; no token changed.\n' >&2
+  if [[ ! "$github_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
+    printf 'Expected a GitHub account name containing letters, digits, or hyphens.\n' >&2
     exit 1
   fi
-  printf '\n'
-  if [[ -z "$github_token" ]]; then
-    printf 'Cancelled; no token changed.\n'
-    exit 0
-  fi
-  if [[ ! "$github_token" =~ ^github_pat_[a-zA-Z0-9_]+$ ]]; then
-    printf 'Expected a fine-grained token beginning with github_pat_. No token changed.\n' >&2
+  if ! github_token="$(host_gh auth token --hostname github.com --user "$github_user" 2> /dev/null)"; then
+    printf 'Cannot retrieve the host gh credential for account %s. Sign in to that account with gh auth login on the host. No session binding changed.\n' "$github_user" >&2
     exit 1
   fi
+  if [[ ! "$github_token" =~ ^[a-zA-Z0-9_]+$ ]]; then
+    printf 'Host gh returned an empty or malformed credential. No session binding changed.\n' >&2
+    exit 1
+  fi
+  unset github_token
   umask 077
   if [[ -L "$github_dir" ]]; then
-    printf 'Refusing a symlinked devtainer credential directory.\n' >&2
+    printf 'Refusing a symlinked session directory.\n' >&2
     exit 1
   fi
   mkdir -p "$github_dir"
   if [[ ! -O "$github_dir" ]]; then
-    printf 'The devtainer credential directory must be owned by this user.\n' >&2
+    printf 'The session directory must be owned by this user.\n' >&2
     exit 1
   fi
   chmod 700 "$github_dir"
-  github_tmp="$(mktemp -d "$github_dir/.setup.XXXXXXXXXX")"
-  # Invoked by the EXIT trap.
-  # shellcheck disable=SC2329
-  cleanup_github_setup() { rm -rf -- "$github_tmp"; }
-  trap cleanup_github_setup EXIT
+  github_tmp="$(mktemp "$github_dir/.account.XXXXXXXXXX")"
+  trap 'rm -f -- "$github_tmp"' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  printf 'version: 1\n' > "$github_tmp/config.yml"
-  printf 'github.com:\n    oauth_token: "%s"\n' "$github_token" > "$github_tmp/hosts.yml"
-  if ! github_user="$(
-    unset GH_TOKEN GITHUB_TOKEN GH_DEBUG
-    export GH_CONFIG_DIR="$github_tmp"
-    gh api --hostname github.com user --jq .login 2> /dev/null
-  )"; then
-    printf 'GitHub could not validate this token. Check the token and network connection; no saved token changed.\n' >&2
-    exit 1
-  fi
-  if [[ ! "$github_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
-    printf 'GitHub returned an invalid account name; no saved token changed.\n' >&2
-    exit 1
-  fi
-  printf '%s\n%s\n' "$github_user" "$github_token" > "$github_tmp/credential"
-  chmod 600 "$github_tmp/credential"
-  mv -fT -- "$github_tmp/credential" "$github_file"
-  unset github_token github_user
-  printf 'Saved %s (mode 600). Start a new container to use it.\n' "$github_file"
+  printf '%s\n' "$github_user" > "$github_tmp"
+  chmod 600 "$github_tmp"
+  mv -fT -- "$github_tmp" "$github_file"
+  printf 'Session "%s" now uses host gh account "%s". Its token is retrieved on each launch with the host login permissions.\n' "$github_name" "$github_user"
   exit 0
 fi

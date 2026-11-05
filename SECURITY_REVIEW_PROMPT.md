@@ -1,7 +1,7 @@
 # Devtainer Security Review Prompt
 
 Review devtainer for security vulnerabilities, with particular attention to the
-dedicated-token-to-container GitHub credential handoff. Review both the current
+host-gh-to-container GitHub credential handoff. Review both the current
 working tree and the committed changes: there are unrelated local tool and sandbox
 changes that also affect the overall security posture. Make no changes initially.
 
@@ -9,22 +9,25 @@ Intended behavior:
 
 - The builder's username, UID, GID, and home are used inside the image.
 - dev defaults to session dev; --session personal selects a separate persistent
-  home volume and host GitHub profile. Subcommands always follow the session.
+  home volume and host GitHub account binding. Subcommands always follow the session.
 - No previous volumes or profiles are migrated. Host Claude/Git/Neovim state,
   caches, and GPG sockets are not mounted. Wayland is still shared when available.
 - reset-home checks volume labels and attachments, takes an exclusive per-session
   lock, and requires typing the session name. It removes only that home volume.
-  Normal launches hold shared locks; host GitHub profiles and workspaces are kept.
-- Host-only setup-github opens a fine-grained PAT form prefilled with read access
-  to Contents, Actions, and Pull requests. Hidden input and isolated gh API login
-  validation precede atomic saving of the selected session credential (600/700).
-- Setup validates identity, not grants; the user must select only read permissions.
-- The launcher read only the selected dedicated profile. Missing/unsafe profiles
-  fail closed; no fallback to the full-access host login or token environment exists.
+  Normal launches hold shared locks; host account bindings and workspaces are kept.
+- Host-only setup-github [ACCOUNT] binds the session to an existing host gh
+  account, using the active account if omitted. It atomically stores only the
+  username (600/700), never a persistent token copy. No PAT setup is required.
+- Each launch retrieves gh auth token --hostname github.com --user <bound-account>
+  through the host keyring/config. Switching the active host account must not
+  switch an already bound session. Failure never falls back to another account.
+- The token retains all host permissions, including writes. This is intentional.
+- GH_TOKEN/GITHUB_TOKEN/GH_DEBUG are removed during host retrieval, while host
+  GH_CONFIG_DIR/XDG_CONFIG_HOME selection is respected.
 - They create a unique temporary directory (700) and hosts.yml/config.yml (600),
   mount it read-only at the container user's ~/.config/gh, and set GH_CONFIG_DIR.
 - No host gh config or OS keyring is mounted. No credential is passed through
-  Docker arguments or token environment variables. The persistent credential store
+  Docker arguments or token environment variables. The host account-binding configuration
   itself is not mounted.
 - The entrypoint clears token overrides and restores the expected GH_CONFIG_DIR
   after loading the persistent home environment.
