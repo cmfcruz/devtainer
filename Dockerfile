@@ -29,9 +29,6 @@ ARG BUOY_VERSION=v3.0.0
 ARG USER_UID=1000
 ARG USER_GID=1000
 
-ENV HOME=/home/${USERNAME}
-ENV NVM_DIR=${HOME}/.nvm
-ENV PYENV_ROOT=${HOME}/.pyenv
 ENV SHELL=/bin/bash
 ENV LANG=C.UTF-8
 ENV LC_CTYPE=C.UTF-8
@@ -162,6 +159,12 @@ RUN groupmod --new-name "${USERNAME}" ubuntu \
     && groupmod --gid "${USER_GID}" "${USERNAME}" \
     && usermod --login "${USERNAME}" --uid "${USER_UID}" --gid "${USER_GID}" --home "/home/${USERNAME}" --move-home --shell /bin/bash ubuntu \
     && chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}"
+
+# Root-run CLI checks can create state under HOME (including gh's device ID).
+# Set the target home only after usermod has moved Ubuntu's existing home.
+ENV HOME=/home/${USERNAME}
+ENV NVM_DIR=${HOME}/.nvm
+ENV PYENV_ROOT=${HOME}/.pyenv
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
