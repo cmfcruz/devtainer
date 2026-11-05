@@ -395,6 +395,7 @@ if [[ -f "$HOME/.devtainer-env" ]]; then
 fi
 # Use the mounted gh login even when a persistent home exports stale tokens.
 unset GH_TOKEN GITHUB_TOKEN
+export GH_CONFIG_DIR="$HOME/.config/gh"
 if [[ "${DEVIL_MODE:-}" == "true" ]]; then
   export PATH="/usr/local/bin:$PATH"
   nvim_plugin_dir="$HOME/.config/nvim/plugin"

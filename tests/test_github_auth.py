@@ -19,8 +19,8 @@ class GitHubAuthTest(unittest.TestCase):
         )[1].split("\nSCRIPT\n", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            config = home / "gh"
-            config.mkdir()
+            config = home / ".config/gh"
+            config.mkdir(parents=True)
             stored = "gho_STORED_TEST_CREDENTIAL"
             hosts = config / "hosts.yml"
             original = (f"github.com:\n    user: test-user\n    oauth_token: {stored}\n"
@@ -29,7 +29,7 @@ class GitHubAuthTest(unittest.TestCase):
             hosts.write_text(original)
             # A persistent devil home can reload tokens after Docker starts.
             (home / ".devtainer-env").write_text(
-                "export GH_TOKEN=stale-home-token\nexport GITHUB_TOKEN=stale-home-token\n"
+                "export GH_TOKEN=stale-home-token\nexport GITHUB_TOKEN=stale-home-token\nexport GH_CONFIG_DIR=/wrong/config\n"
             )
             env = dict(os.environ, HOME=directory, GH_CONFIG_DIR=str(config),
                        CODEX_HOME=str(home / ".codex"), DEVIL_MODE="",

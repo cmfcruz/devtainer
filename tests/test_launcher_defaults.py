@@ -25,6 +25,9 @@ class LauncherDefaultsTest(unittest.TestCase):
                 "Path(os.environ['HOME'], 'docker.json').write_text(json.dumps(sys.argv[1:]))\n"
             )
             docker.chmod(0o755)
+            gh = fake_bin / "gh"
+            gh.write_text("#!/bin/sh\nif [ \"$1\" = config ]; then echo test-user; else echo gho_FAKE_TEST_CREDENTIAL; fi\n")
+            gh.chmod(0o755)
             env = dict(os.environ, HOME=directory,
                        PATH=f"{fake_bin}:{os.environ['PATH']}")
             for key in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "WAYLAND_DISPLAY"):

@@ -184,27 +184,52 @@ buoy.nvim doesn't use an MCP server: it wires up the prompt hook, the private CL
 
 ## Host GitHub CLI Configuration
 
-Both `dev` and `devil` mount your host `~/.config/gh` read-only when it
-exists, so `gh` can reuse your host login and settings. Host `GH_CONFIG_DIR`
-and `XDG_CONFIG_HOME` overrides are respected. Run `./install.sh`
-on the host to regenerate both launchers, then start a new container.
+Both `dev` and `devil` require a saved host GitHub CLI login for `github.com`.
+At each launch, host `gh config get user --host github.com` selects the active
+account, then `gh auth token --hostname github.com --user <account>` retrieves its
+credential from its keyring or saved config. Host `GH_CONFIG_DIR` and
+`XDG_CONFIG_HOME` overrides are respected by `gh`; `GH_TOKEN` and `GITHUB_TOKEN`
+are ignored during retrieval. A missing CLI, failed retrieval, or empty/malformed
+token stops the launcher before starting the container. Retrieval does not check
+whether GitHub has expired or revoked the credential.
 
-GitHub authentication uses the mounted host config. The launchers do not forward
-`GH_TOKEN` or `GITHUB_TOKEN`, and the entrypoint clears both variables after
-loading the container home environment so stale tokens cannot override that login.
-The `setup-github` command and `--github-token` option have been removed; saved
-devtainer token files are no longer read or mounted.
+The launcher creates a unique directory under `${TMPDIR:-/tmp}` with mode `700`
+and writes a minimal `hosts.yml` with mode `600`. Only this directory is mounted,
+read-only, at `/home/<build username>/.config/gh` inside the container. The host
+config directory and OS keyring are not mounted. The temporary config includes
+only the active `github.com` token and selects HTTPS for `gh` Git operations;
+host aliases, other accounts, enterprise hosts, and SSH credentials are not copied.
+Existing repository remotes are not rewritten.
 
-The mounted login has the same GitHub permissions as on the host. Read-only
-mounting prevents config changes; it does not restrict GitHub API access.
-If your host login stores its token in an OS keyring, the config mount alone
-cannot provide that token inside the container. Login and account changes
-should be made on the host.
+The token is never passed in container environment variables or command arguments.
+Shell tracing is disabled while retrieving and writing it. The entrypoint clears
+`GH_TOKEN` and `GITHUB_TOKEN` after loading the container home environment and sets
+`GH_CONFIG_DIR` to `$HOME/.config/gh`, preventing stale home settings from
+redirecting the initial login. The `setup-github` command and `--github-token`
+option remain removed; old devtainer token files are not read or mounted.
 
-After updating, rebuild with `./install.sh` and start a new container. Check
-`gh auth status` on the host and `dev gh auth status` (or `devil gh auth status`)
-inside the container. A 401 can mean a stale token overrode the mounted login,
-an expired host credential, or an older installed launcher without the mount.
+The temporary directory is deleted when the launcher exits, including Docker
+failure and handled HUP, INT, and TERM signals. Each launch has its own snapshot;
+account switches and token changes on the host take effect on the next launch.
+SIGKILL, host crashes, or power loss can leave a `devtainer-gh.*` directory under
+the host temporary root. Such leftovers can be removed after their containers stop.
+Use a local Docker daemon: the host temporary path must be available to the daemon.
+The temporary directory must be outside host directories mounted into the
+container; otherwise the launcher stops before retrieving credentials to avoid
+exposing a second copy through `/workspace` or another mount. Set `TMPDIR`
+outside mounted directories when necessary.
+
+The credential retains the host login's GitHub permissions. The temporary file is
+plaintext, readable by its host owner and by the container user. A read-only mount
+prevents modification, not reading or GitHub API writes. Keeping the path under
+`~/.config/gh` allows existing path policies to match it, but does not itself block
+agents or malicious container processes from reading it. This is credential
+sharing, not a credential isolation boundary.
+
+Regenerate the launchers with `./install.sh --skip-build` if the image already has
+the updated entrypoint; otherwise rebuild with `./install.sh`. Start a new
+container and compare `gh auth status` on the host with `dev gh auth status` or
+`devil gh auth status`. Manage login and account changes on the host.
 
 ## Host Mounts
 
@@ -234,8 +259,8 @@ $PWD                           -> /workspace
 devil-<host username>           -> /home, as a Docker named volume
 ```
 
-Both launchers also mount the host GitHub CLI config directory, when present,
-at `~/.config/gh:ro` and set `GH_CONFIG_DIR` to that container path.
+Both launchers also mount a private temporary GitHub credential config at the
+container build user's `~/.config/gh:ro`; the host `~/.config/gh` is not mounted.
 
 Pre-commit normally stores hook environments in `~/.cache/pre-commit`, or in `PRE_COMMIT_HOME` when that variable is set. `dev` sets `PRE_COMMIT_HOME=~/.cache/pre-commit` inside the container and backs it with the dedicated host directory `~/.cache/devtainer/pre-commit`, so hook environments persist across throwaway container runs.
 
