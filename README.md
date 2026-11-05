@@ -8,13 +8,15 @@ The main goal is supply-chain isolation. Pre-commit hooks can install pinned but
 
 `Dockerfile` builds an Ubuntu 26.04 image with:
 
-- Bash, Git, GnuPG, curl, build tools, Neovim, ripgrep, fd, ShellCheck, `yamllint`, `yq`, `actionlint`, `stylua`, and `kubectl`
+- Bash, Git, GitHub CLI (`gh`), GnuPG, curl, build tools, Neovim, ripgrep, fd, ShellCheck, `yamllint`, `yq`, `actionlint`, `stylua`, `kubectl`, Claude Code sandbox dependencies (`bubblewrap` and `socat`), and the Docker CLI (no Docker engine)
 - Node via nvm, pinned in the Dockerfile
 - `@openai/codex`, pinned in the Dockerfile
 - Claude Code, pinned in the Dockerfile
 - [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim), a Neovim plugin cloned into the image that runs Codex or Claude Code in a popup and feeds the agent live editor context through a prompt hook and a private agent CLI
 - Python via pyenv
 - `pre-commit`
+
+The image includes the Docker CLI only. The `dev` launcher does not expose the host Docker socket, so a workflow that needs a Docker daemon must opt into an external daemon connection explicitly.
 
 The image creates a non-root user matching the host username, UID, and GID passed by `install.sh`, so bind-mounted workspace files keep normal ownership.
 
@@ -36,355 +38,206 @@ That lets `dev claude` run in auto mode, which uses a classifier to skip prompts
 
 ## Install
 
-Run:
+The host needs Linux, Bash 4+, Docker, and `flock` (util-linux). Host `gh` is also
+needed for GitHub setup. The image uses the builder's username, UID, and GID.
 
 ```bash
-./install.sh
+bash install.sh
 ```
 
-This builds the Docker image, then installs host launchers at:
+This builds `devtainer:26.04` and installs `~/bin/dev`. Use `IMAGE_NAME` to select
+another image tag. The installer adds `~/bin` to the host Bash PATH if needed.
+Use `bash install.sh --skip-build` after a launcher-only change; `--no-cache`
+forces a fresh image build. Those two options cannot be combined.
+
+There is no migration. The generated `devil` and `dev-secure` launchers are retired;
+old Docker volumes, host caches, and old GitHub profiles are left untouched. They
+are not imported into the new sessions. Configure credentials and tools afresh.
+Custom commands at the legacy launcher paths are not overwritten or deleted.
+
+## Named Sessions
 
 ```bash
-~/bin/dev
-~/bin/devil
+dev                             # default session: dev
+dev --session personal          # independent personal environment
+dev --session personal claude   # override the default tmux command
 ```
 
-The default image tag is:
-
-```bash
-devtainer:26.04
-```
-
-Override it during install if you need a different local tag:
-
-```bash
-IMAGE_NAME=my-devtainer:26.04 ./install.sh
-```
-
-If needed, it also idempotently adds this to `~/.bashrc`:
-
-```bash
-export PATH="$HOME/bin:$PATH"
-```
-
-Open a new shell, or run:
-
-```bash
-source ~/.bashrc
-```
-
-## Usage
-
-From any repository:
-
-```bash
-dev
-```
-
-`dev` is the Claude Code-capable mode. It mounts `~/.claude` and `~/.claude.json` read-write, mounts dedicated host dependency caches, and mounts the host GPG agent extra socket and public keyring for code signing when available.
-
-With no arguments, both `dev` and `devil` open a tmux session named after the host directory you launched from, starting a shell in `/workspace`. Periods and colons in directory names become underscores because tmux reserves those characters. For example, launching from `~/code/my.app` creates session `my_app`. The session attaches if it already exists in that container. Sessions last for the lifetime of the container; the `devil` home volume persists files, not running sessions. Pass a command to override the default, such as `dev nvim .` or `devil bash`.
-
-Use `devil` for a persistent container home backed by a Docker named volume:
-
-```bash
-devil
-```
-
-The volume is named `devil-<host username>` and mounted at `/home`. On first use, Docker initializes the empty volume from the image's `/home`, including the default tmux and Neovim settings baked into the image. The managed Codex and Claude Code wrappers are also installed at `/usr/local/bin/codex` and `/usr/local/bin/claude` so existing `devil` volumes created by older images can still use them after rebuilding devtainer.
-
-`dev` handles dependency installation and pre-commit environment setup:
-
-```bash
-dev npm install
-dev npm ci
-dev pip install -r requirements.txt
-dev pre-commit install
-dev pre-commit install-hooks
-dev pre-commit run --all-files
-```
-
-Use `pre-commit install` to install the Git hook script, and `pre-commit install-hooks` to download and build the hook environments in the shared pre-commit cache.
-
-Code signing also runs in `dev`:
-
-```bash
-dev git commit -S -m "signed change"
-dev git tag -s v1.0.0
-```
-
-`dev` mounts the host GPG agent extra socket when available and public GPG keyring files read-only when present, so signing uses the host agent. Private key files are never mounted. Because `dev` also mounts the shared pre-commit cache, a signed commit reuses already-built hook environments; to skip hooks entirely, use `--no-verify`:
-
-```bash
-dev git commit -S --no-verify -m "signed change"
-```
-
-Or pass a command to either launcher:
-
-```bash
-dev claude
-dev bash
-dev git status
-dev pre-commit run --all-files
-devil bash
-devil claude
-```
-
-The hook config checks shell formatting/linting, Dockerfile linting, Markdown linting, YAML syntax, private-key leaks, merge conflict markers, line endings, trailing whitespace, executable shebangs, and stale pre-commit excludes.
-
-The current directory is mounted at:
-
-```bash
-/workspace
-```
-
-The container is run with:
-
-- `--rm`
-- `--cap-drop ALL`
-- `--security-opt no-new-privileges`
-
-## UTF-8 And Neovim
-
-The image defaults to `C.UTF-8` so shells, tmux, Git, Python, and Neovim can read and write UTF-8 text such as Japanese characters without switching command output to a Japanese locale.
-
-Verify the active character map with:
-
-```bash
-dev bash -lc 'locale charmap'
-devil bash -lc 'locale charmap'
-```
-
-Both commands should print:
+A session selects persistent account state, not a running container. Each launch
+creates a new container from the same image, mounts the current project at
+`/workspace`, and attaches the selected session's home volume at `/home`:
 
 ```text
-UTF-8
+dev       -> devtainer-<builder UID>-dev-home
+personal  -> devtainer-<builder UID>-personal-home
 ```
 
-`devil` uses a self-contained home volume, so devtainer also installs a managed Neovim UTF-8 plugin inside that volume. Existing custom Neovim configuration is left in place; only `~/.config/nvim/plugin/devtainer-utf8.lua` is created or refreshed when it is already marked as managed by devtainer.
+Claude/Codex logins, configuration, shell settings, Git identity, Neovim data,
+caches, and tools installed under home persist independently in each volume.
+Configure them inside the selected session. Host Claude state, Git and Neovim
+configuration, dependency caches, and the host GPG agent are not mounted.
+The container home is `/home/<build username>`, regardless of the host home path.
 
-If Japanese text appears as boxes or missing glyphs, change the host terminal font to one with Japanese glyph coverage. The container controls encoding; the terminal controls glyph rendering.
+Session names contain 1-48 letters, digits, underscores, or hyphens, starting with
+a letter or digit. Session options precede subcommands and container commands:
 
-## Clipboard
+```bash
+dev --session personal setup-github
+dev --session personal reset-home
+dev --session personal git status
+```
 
-The container has no X or Wayland clipboard provider, so Neovim is configured to route the system clipboard (`unnamedplus`) through [OSC 52](https://github.com/neovim/neovim/pull/25872) escape sequences. Yanks to the `+`/`*` registers are sent to the host clipboard via the terminal emulator, and pastes read from it, so copy and paste integrate with the host without mounting any host clipboard socket.
+With no command, tmux uses the current project directory's name, replacing periods
+and colons with underscores. This tmux name is independent of the account session.
+Running tmux processes end with their container; the home volume persists files.
+Multiple containers can use one session home concurrently, so account changes and
+home-file edits are shared within that session. Use different sessions for account
+separation; the project mount remains shared if you select the same project.
 
-This requires a terminal emulator with OSC 52 support enabled (Ghostty, kitty, WezTerm, iTerm2, recent Windows Terminal, and others). If clipboard integration does not work, confirm your terminal allows OSC 52 clipboard writes/reads.
+The bundled buoy.nvim plugin defaults to Claude Code for all sessions. Use
+`DEVTAINER_AGENT=codex dev --session personal` to select Codex, or configure
+`DEVTAINER_AGENT` in that session's home environment. Claude Code and Codex are
+available directly in every session.
 
-## Neovim Agent Popup
+## Dedicated Read-only GitHub Access
 
-The image clones [`buoy.nvim`](https://github.com/cmfcruz/buoy.nvim), so Neovim inside every devtainer mode automatically loads it. The plugin does two things:
-
-- Toggles the agent's official TUI (Codex or Claude Code) in a popup window with `:Buoy` or `<F2>`.
-- Enriches every prompt you submit with a snapshot of the live editor state (cwd, current file, cursor, visual selection, and open buffers) through a `UserPromptSubmit` hook, and gives the agent a private, session-scoped CLI to read buffer ranges and diagnostics or move the cursor mid-turn — so you can say "refactor this selection" without pasting code.
-
-The plugin is installed at `/usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim`, a system runtime path that is not under `$HOME`. This keeps it active even in `dev`, where the host `~/.config/nvim` and `~/.local/share/nvim` are mounted read-only over the container home. A managed sibling file initializes the plugin on startup, selecting Claude Code in `dev` and Codex in `devil` to match each mode's default agent. `devil` sets `DEVTAINER_AGENT=codex` in its launcher; set that variable yourself to override the agent in either mode.
-
-buoy.nvim doesn't use an MCP server: it wires up the prompt hook, the private CLI, and its own agent instructions itself when it launches the agent, so the `codex` and `claude` wrappers carry no buoy-specific flags and nothing is seeded into `~/.codex` or `~/.claude.json`. The entrypoint removes the `AGENTS.md` guidance file that older devtainer images seeded into `$CODEX_HOME` (only the copy carrying the `Managed by devtainer.` marker; a file of your own is never touched).
-
-## Host GitHub CLI Configuration
-
-The image installs GitHub CLI `2.103.3` from its pinned upstream release, with
-SHA-256 verification for both amd64 and arm64. Rebuild with `bash install.sh`
-to update the CLI; regenerating launchers alone does not update the image.
-
-Both launchers use dedicated fine-grained personal access tokens, separate from
-your normal host `gh` login. Regenerate launchers with `bash install.sh --skip-build`,
-then run either host command:
+GitHub profiles follow the selected session. The default and personal session
+must each be configured independently, even if they previously used `devil`:
 
 ```bash
 dev setup-github
-# Equivalent: devil setup-github
+dev --session personal setup-github
 ```
 
-Setup opens a GitHub token creation form with a 30-day expiration and **Contents**,
-**Actions**, and **Pull requests** set to **Read-only**. Select the resource owner
-and only the repositories you need; Metadata read access is included. The form is
-editable: grant no write permissions. GitHub enforces the grants you select;
-setup validates the token's format and account login, not its permission grants.
+Setup runs on the host without Docker. It opens a token form with a 30-day
+expiration and **Contents**, **Actions**, and **Pull requests** set to **Read-only**.
+Choose the resource owner and selected repositories. Metadata read is included.
+The form can be edited: grant no write permissions. Setup validates token format
+and account login, not its permissions. GitHub enforces the actual grants.
 See [GitHub's fine-grained token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
-Paste the token at the hidden prompt. Host `gh` validates it using an isolated
-temporary config, without changing your normal login or taking credentials from
-`GH_TOKEN`/`GITHUB_TOKEN`. Setup requires host `gh` and network access; normal
-container launches require neither. If a browser cannot open, use the printed URL.
-Empty input cancels. Failed validation preserves any saved credential.
+Paste the token at the hidden prompt. Host `gh` validates it through an isolated
+temporary config, without changing your normal login. A failed validation or
+cancelled prompt preserves the saved profile. If a browser cannot open, use the
+printed URL. A fine-grained token covers one resource owner; organization approval
+may be required even after the login check succeeds.
 
-The account name and token are saved together in
-`~/.config/devtainer/github/default.credential` (mode `600`, parent mode `700`).
-Setup replaces this file atomically after successful login validation. Both
-launchers share it. For separate repository owners, use named profiles:
-
-```bash
-dev setup-github office
-devil --github-token office gh repo view ORGANIZATION/REPO
-dev --github-token office
-```
-
-A fine-grained token covers one resource owner. Organizations may require approval;
-a successful login check does not mean an organization has approved repository
-access. Missing, unsafe, or malformed credentials stop the launcher; it never
-falls back to your full-access host login or token environment variables. Older
-`*.token` files are not used; rerun setup to save a new credential profile.
-
-The launcher creates a unique directory under `${TMPDIR:-/tmp}` with mode `700`
-and writes minimal `hosts.yml` and `config.yml` files with mode `600`.
-`config.yml` declares schema version `1` so `gh` does not try to migrate the
-read-only config on startup. Only this directory is mounted,
-read-only, at `/home/<build username>/.config/gh` inside the container. The host
-config directory and OS keyring are not mounted. The temporary config includes
-only the selected dedicated `github.com` token and selects HTTPS for `gh` Git operations;
-host aliases, other accounts, enterprise hosts, and SSH credentials are not copied.
-Existing repository remotes are not rewritten.
-
-The token is never passed in container environment variables or command arguments.
-Shell tracing is disabled while retrieving and writing it. The entrypoint clears
-`GH_TOKEN` and `GITHUB_TOKEN` after loading the container home environment and sets
-`GH_CONFIG_DIR` to `$HOME/.config/gh`, preventing stale home settings from
-redirecting the initial login. The persistent credential store itself is never
-mounted; launchers reject working directories that would expose that store
-through a directory bind mount.
-
-The temporary directory is deleted when the launcher exits, including Docker
-failure and handled HUP, INT, and TERM signals. Each launch has its own snapshot;
-replacing a saved profile takes effect on the next launch.
-SIGKILL, host crashes, or power loss can leave a `devtainer-gh.*` directory under
-the host temporary root. Such leftovers can be removed after their containers stop.
-Use a local Docker daemon: the host temporary path must be available to the daemon.
-The temporary directory must be outside host directories mounted into the
-container; otherwise the launcher stops before retrieving credentials to avoid
-exposing a second copy through `/workspace` or another mount. Set `TMPDIR`
-outside mounted directories when necessary.
-
-The credential has the permissions selected when creating its PAT. With only
-read grants, GitHub rejects writes made with that credential. The temporary file is
-plaintext, readable by its host owner and by the container user. A read-only mount
-prevents modification, not reading or GitHub API writes. Keeping the path under
-`~/.config/gh` allows existing path policies to match it, but does not itself block
-agents or malicious container processes from reading it. This is credential
-sharing, not a credential isolation boundary.
-
-Regenerate the launchers with `./install.sh --skip-build` if the image already has
-the updated entrypoint; otherwise rebuild with `./install.sh`. Start a new
-container and check `dev gh auth status` or `devil gh auth status`.
-Run setup again to rotate a profile. Delete its `.credential` file to stop future
-launches from using it; revoke the token on GitHub to invalidate running copies.
-Your normal host login is independent of these profiles.
-
-## Host Mounts
-
-The launchers mount only a small set of host paths.
-
-`dev` mounts:
+The profile is stored on the host at:
 
 ```text
-$PWD                           -> /workspace
-~/.claude                      -> ~/.claude
-~/.claude.json                 -> ~/.claude.json
-~/.gitconfig                   -> ~/.gitconfig:ro
-~/.gitmessage                  -> ~/.gitmessage:ro
-~/.config/nvim                 -> ~/.config/nvim:ro
-~/.cache/devtainer/pre-commit  -> ~/.cache/pre-commit
-~/.cache/devtainer/npm         -> ~/.cache/npm
-~/.cache/devtainer/pip         -> ~/.cache/pip
-$(gpgconf --list-dirs agent-extra-socket) -> ~/.gnupg/S.gpg-agent, when available
-~/.gnupg/pubring.kbx           -> ~/.gnupg/pubring.kbx:ro, when present
-~/.gnupg/trustdb.gpg           -> ~/.gnupg/trustdb.gpg:ro, when present
+~/.config/devtainer/sessions/<session>/github.credential
 ```
 
-`devil` mounts:
+The session directory is mode `700`, and the credential file is mode `600`. Account
+and token are replaced atomically together. The old `--github-token` option and
+positional profile names are removed; use `--session` for all session selection.
+Old `github/*.credential` and `*.token` files are never used as fallbacks.
 
-```text
-$PWD                           -> /workspace
-devil-<host username>           -> /home, as a Docker named volume
-```
+At launch, only that session's credential is copied into a temporary directory
+(mode `700`), containing `hosts.yml` and `config.yml` (mode `600`). Schema version
+`1` prevents configuration migration on the read-only mount. This directory is
+mounted at the container user's `~/.config/gh`, and `GH_CONFIG_DIR` points there.
+The host gh config, keyring, and persistent profile store are not mounted.
 
-Both launchers also mount a private temporary GitHub credential config at the
-container build user's `~/.config/gh:ro`; the host `~/.config/gh` is not mounted.
+Credentials are not passed through Docker arguments or token environment
+variables. Shell tracing is disabled during credential handling. Missing, unsafe,
+or malformed profiles stop launch; another session or the host's full-access login
+is never used instead. Normal launches require neither host `gh` nor API access.
+The entrypoint clears initial token overrides after loading its home environment.
+Later interactive shell configuration can still override environment settings.
 
-Pre-commit normally stores hook environments in `~/.cache/pre-commit`, or in `PRE_COMMIT_HOME` when that variable is set. `dev` sets `PRE_COMMIT_HOME=~/.cache/pre-commit` inside the container and backs it with the dedicated host directory `~/.cache/devtainer/pre-commit`, so hook environments persist across throwaway container runs.
+Temporary snapshots are removed after exit, Docker failure, and handled HUP, INT,
+and TERM signals. SIGKILL or a host crash can leave plaintext snapshots under
+`${TMPDIR:-/tmp}`. Remove leftovers after their containers stop. The temporary root
+must be available to a local Docker daemon and outside the project mount. A
+workspace containing the persistent credential store is also rejected.
 
-`dev` also sets `NPM_CONFIG_CACHE=~/.cache/npm` and `PIP_CACHE_DIR=~/.cache/pip` inside the container, backed by dedicated host directories under `~/.cache/devtainer`. This avoids reinstalling dependency artifacts on every throwaway container run without mounting the host's broader `~/.cache`.
+Rotate a profile by running setup again, then start a new container. Deleting its
+host file prevents future use; revoke it on GitHub to invalidate running copies.
+Resetting a home keeps its host profile. An exposed PAT or private repository data
+can still be copied by container code; read-only grants restrict GitHub writes,
+not reads or exfiltration.
 
-To reset cached dependency environments:
+GitHub CLI `2.103.3` is installed from the pinned upstream release with SHA-256
+verification for amd64 and arm64. Check access with:
 
 ```bash
-rm -rf ~/.cache/devtainer/pre-commit ~/.cache/devtainer/npm ~/.cache/devtainer/pip
+dev gh auth status
+dev --session personal gh auth status
 ```
 
-`dev` mounts the host GPG agent extra socket into the container at `~/.gnupg/S.gpg-agent`, but it does not mount private GPG key files. In particular, `~/.gnupg/private-keys-v1.d` is not mounted, so the private key stays on the host and signing happens in the host agent over the socket.
-
-## Git Signing
-
-Start the host GPG agent:
+## Reset a Session Home
 
 ```bash
-gpgconf --launch gpg-agent
+dev reset-home
+dev --session personal reset-home
 ```
 
-Confirm the extra socket exists:
+The command displays the exact volume and requires typing the selected session
+name in an interactive terminal. It deletes that volume's logins, shell state,
+settings, caches, and home-installed tools. The next launch initializes a fresh
+home from the image. The host GitHub profile and mounted project files are kept.
+A missing home volume is already reset and requires no confirmation.
+
+Reset refuses homes used by another launcher or attached to any Docker container,
+including stopped containers. Stop and remove those containers first. Shared
+session locks allow concurrent launches and prevent a reset from racing them.
+Ownership labels must match the builder UID and session; arbitrary or old volumes
+are not adopted or deleted. Volume removal is never forced.
+
+Rebuilding the image and resetting a home are separate operations. Image rebuilds
+update system-level tools but do not replace an existing volume's home-installed
+runtimes or configuration. Reset the affected session to seed those from the new
+image. A reset is not a complete compromise recovery: inspect the workspace and
+Git hooks, revoke exposed credentials, and rebuild from trusted sources as needed.
+
+## Clipboard, Neovim, and Signing
+
+When Wayland is available, `dev` mounts its socket at `/run/host-wayland/wayland-0`
+and exposes it to clipboard tools. This gives container code host clipboard access
+and any further capabilities offered by the compositor. Without Wayland, Neovim
+uses OSC 52, subject to terminal support and clipboard permissions.
+
+The image uses UTF-8 (`C.UTF-8`) and includes a Neovim UTF-8 plugin. The bundled
+buoy.nvim plugin lives in the system runtime, outside session homes, and connects
+agents to live editor context without sharing the host's Neovim state.
+
+Git identity and signing credentials are configured within each session. No host
+GPG socket or keyring is automatically shared. Private keys created in a session
+are part of that session's home state and are deleted by `reset-home`.
+
+## Container Sandbox
+
+All sessions retain the existing `dev` sandbox configuration: dropped capabilities,
+`no-new-privileges`, a [seccomp profile](security/claude-sandbox-seccomp.json), and
+the [devtainer AppArmor profile](security/devtainer-nested-sandbox.apparmor).
+Claude Code's nested sandbox needs Bubblewrap and socat, included in the image.
+Install and load the AppArmor profile on the Docker host before first launch:
 
 ```bash
-gpgconf --list-dirs agent-extra-socket
+sudo install -m 0644 security/devtainer-nested-sandbox.apparmor /etc/apparmor.d/devtainer-nested-sandbox
+sudo apparmor_parser -r /etc/apparmor.d/devtainer-nested-sandbox
 ```
 
-Inside `dev`, configure Git signing if your mounted `~/.gitconfig` does not already do so:
+The launcher uses `systempaths=unconfined` for Bubblewrap to create its nested
+`/proc`. The custom profiles allow namespace and mount operations to all processes
+in the container, while capabilities remain dropped. These settings expose more
+kernel surface than standard Docker defaults. An unloaded named AppArmor profile
+causes Docker to reject the launch. `DEVTAINER_APPARMOR_PROFILE` selects a different
+loaded profile, but its restrictions may prevent Claude's nested sandbox working.
 
-```bash
-dev git config user.signingkey YOUR_KEY_ID
-dev git config commit.gpgsign true
-dev git config gpg.program gpg
-```
+## Security Boundary
 
-Verify GPG signing:
+These are separate home environments, not complete isolation from the host or
+from each other. All sessions use the same image and host kernel, can reach the
+network, can access their dedicated GitHub credential, and can change the mounted
+workspace. The host Wayland socket is shared when available. A malicious process
+can persist inside its session home until reset.
 
-```bash
-dev bash -lc "printf 'test\n' | gpg --local-user YOUR_KEY_ID --clearsign"
-```
-
-Verify Git signing:
-
-```bash
-dev git commit --allow-empty -S -m "test signed commit"
-dev git log -1 --show-signature
-```
-
-## Security Model
-
-This setup is designed so pre-commit hooks and package installers run in the container, not directly on the host. The container limits the blast radius of a supply-chain attack or prompt injection to what is explicitly mounted; anything not on the mount list stays out of reach.
-
-`dev` is a single container that runs untrusted code (npm installs, pre-commit hooks) alongside your Claude Code credentials and GPG signing socket. Understand what that co-location exposes.
-
-Still protected — never mounted into any container:
-
-- Private GPG key files. Signing uses the host GPG agent over its extra socket; `~/.gnupg/private-keys-v1.d` is not mounted, so the private key never leaves the host and cannot be extracted.
-- SSH keys, cloud credentials (`~/.aws`, `~/.config/gcloud`, and similar), and everything else in your host home outside the explicit mount list.
-- Any repository or file outside the current directory (`$PWD`).
-
-Both modes expose the selected dedicated GitHub credential to container code.
-GitHub enforces the permissions chosen for the PAT; a read-only mount does not
-reduce those permissions. The token and permitted private data can still be read
-or exfiltrated by a compromised process. Revoke the PAT on GitHub after suspected
-compromise.
-
-Exposed to code running in `dev` — treat as reachable by a compromised dependency or injected prompt:
-
-- `~/.claude` and `~/.claude.json`, mounted read-write because Claude Code needs its config/auth state. A malicious process in `dev` can read and, with network access, exfiltrate these. Treat them as sensitive, and rotate Claude credentials if you suspect compromise.
-- The GPG agent extra socket. The extra socket restricts key-management operations, but a compromised process can still ask the agent to produce signatures while the socket is mounted.
-- The pre-commit, npm, and pip caches, which persist across container runs. Malicious install code could persist there until the caches are deleted.
-- The current repository, mounted read-write so development commands can edit files.
-
-If an old alias or shell function shadows `~/bin/dev`, remove it:
-
-```bash
-unalias dev 2>/dev/null || true
-unset -f dev 2>/dev/null || true
-hash -r
-type -a dev
-```
-
-`type -a dev` should resolve to:
-
-```text
-~/bin/dev
-```
+The launcher does not share host Claude configuration, host home caches, host
+Git/Neovim settings, the host GPG agent, SSH keys, cloud credentials, or the Docker
+socket. However, anything inside the directory selected as the workspace is
+reachable. Do not use a broad workspace containing sensitive host files. Project
+scripts and Git hooks changed inside a container can execute later on the host.
+Path policies under `~/.config/gh` may constrain an agent's sandboxed tools, but do
+not make credentials inaccessible to arbitrary code running as the container user.

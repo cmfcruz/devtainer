@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# Inputs supplied by the installer or preceding launcher fragments.
+: "${dev_session:?}" "${session_dir:?}"
 # Embedded in both host launchers. Never trace pasted or stored credentials.
 github_trace=false
 # Used by the embedded config-mount block in install.sh.
@@ -6,31 +8,19 @@ github_trace=false
 [[ $- != *x* ]] || github_trace=true
 set +x
 
-github_name=default
+github_name="$dev_session"
 github_setup=false
 if [[ "${1:-}" == setup-github ]]; then
   github_setup=true
   shift
-  if [[ $# -gt 1 ]]; then
-    printf 'Usage: %s setup-github [name]\n' "${0##*/}" >&2
+  if [[ $# -ne 0 ]]; then
+    printf 'Usage: dev [--session NAME] setup-github\n' >&2
     exit 1
   fi
-  github_name="${1:-default}"
-elif [[ "${1:-}" == --github-token ]]; then
-  if [[ $# -lt 2 ]]; then
-    printf 'Usage: %s --github-token NAME [command ...]\n' "${0##*/}" >&2
-    exit 1
-  fi
-  github_name="$2"
-  shift 2
-fi
-if [[ ! "$github_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
-  printf 'Token names must start with a letter or digit and contain only letters, digits, _ or -.\n' >&2
-  exit 1
 fi
 
-github_dir="$HOME/.config/devtainer/github"
-github_file="$github_dir/$github_name.credential"
+github_dir="$session_dir"
+github_file="$github_dir/github.credential"
 if [[ "$github_setup" == true ]]; then
   if [[ ! -t 0 ]]; then
     printf 'setup-github needs an interactive terminal; token input is hidden.\n' >&2
@@ -53,7 +43,7 @@ if [[ "$github_setup" == true ]]; then
   else
     printf 'Open the URL above manually if no browser opened.\n' >&2
   fi
-  printf 'Saving token "%s" for dev and devil; an existing token with this name will be replaced.\n' "$github_name"
+  printf 'Saving the dedicated token for session "%s"; its existing token will be replaced.\n' "$github_name"
   if ! IFS= read -rs -p 'Paste token (hidden; empty cancels): ' github_token; then
     printf '\nCancelled; no token changed.\n' >&2
     exit 1

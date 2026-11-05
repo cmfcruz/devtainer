@@ -1,4 +1,4 @@
-"""Check credential snapshots and their lifecycle without real credentials/Docker."""
+"""Session and credential tests using fake Docker and gh, with no real secrets."""
 
 import json
 import os
@@ -11,23 +11,72 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "github_pat_FAKE_TEST_CREDENTIAL"
+PERSONAL_TOKEN = "github_pat_FAKE_PERSONAL_CREDENTIAL"
+
+DOCKER = r'''#!/usr/bin/env python3
+import json, os, re, sys, time
+from pathlib import Path
+home = Path(os.environ['HOME'])
+args = sys.argv[1:]
+with (home / 'docker-calls.jsonl').open('a') as f:
+    f.write(json.dumps(args) + '\n')
+state_file = home / 'docker-state.json'
+state = json.loads(state_file.read_text()) if state_file.exists() else {'volumes': {}}
+if args[:2] == ['volume', 'create']:
+    name = args[-1]
+    labels = dict(args[i+1].split('=', 1) for i, a in enumerate(args) if a == '--label')
+    state['volumes'].setdefault(name, {'labels': labels, 'marker': name})
+    state_file.write_text(json.dumps(state))
+    print(name)
+elif args[:2] == ['volume', 'inspect']:
+    labels = state['volumes'][args[-1]]['labels']
+    print(':'.join(labels.get(k, '') for k in ('devtainer.managed', 'devtainer.uid', 'devtainer.session')))
+elif args[:2] == ['volume', 'ls']:
+    pattern = args[-1].split('=', 1)[1]
+    print('\n'.join(n for n in state['volumes'] if re.fullmatch(pattern, n)))
+elif args[:2] == ['volume', 'rm']:
+    if os.environ.get('TEST_REMOVE_FAIL'):
+        sys.exit(1)
+    del state['volumes'][args[-1]]
+    state_file.write_text(json.dumps(state))
+    print(args[-1])
+elif args[0] == 'ps':
+    print(os.environ.get('TEST_ATTACHED', ''))
+elif args[0] == 'run':
+    mount = next(a for a in args if a.startswith('type=bind,source='))
+    source = Path(mount.split('source=', 1)[1].split(',target=', 1)[0])
+    hosts = source / 'hosts.yml'
+    schema = source / 'config.yml'
+    data = {'args': args, 'source': str(source), 'config': hosts.read_text(),
+            'dir_mode': source.stat().st_mode & 0o777,
+            'file_mode': hosts.stat().st_mode & 0o777,
+            'schema': schema.read_text(), 'schema_mode': schema.stat().st_mode & 0o777}
+    (home / 'docker.json').write_text(json.dumps(data))
+    if os.environ.get('TEST_WAIT'):
+        time.sleep(30)
+    sys.exit(int(os.environ.get('TEST_DOCKER_EXIT', '0')))
+else:
+    raise SystemExit('unexpected Docker command: ' + repr(args))
+'''
 
 
 class HostGhConfigTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="devtainer gh ")
+        self.temp = tempfile.TemporaryDirectory(prefix="devtainer session ")
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name) / "home"
+        self.root = Path(self.temp.name)
+        self.home = self.root / "host home"
         self.home.mkdir()
-        self.tmp_root = Path(self.temp.name) / "tmp"
+        self.work = self.home / "project"
+        self.work.mkdir()
+        self.tmp_root = self.root / "tmp"
         self.tmp_root.mkdir()
-        fake_bin = self.home / "fake-bin"
-        fake_bin.mkdir()
-        gh = fake_bin / "gh"
+        self.fake_bin = self.home / "fake-bin"
+        self.fake_bin.mkdir()
+        gh = self.fake_bin / "gh"
         gh.write_text(
             '#!/usr/bin/env python3\n'
-            'import os, sys\n'
-            'from pathlib import Path\n'
+            'import os, sys\nfrom pathlib import Path\n'
             'assert "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ\n'
             'assert sys.argv[1:] == ["api", "--hostname", "github.com", "user", "--jq", ".login"]\n'
             'config = Path(os.environ["GH_CONFIG_DIR"])\n'
@@ -38,157 +87,139 @@ class HostGhConfigTest(unittest.TestCase):
             'sys.exit(int(os.environ.get("TEST_GH_EXIT", "0")))\n'
         )
         gh.chmod(0o755)
-        docker = fake_bin / "docker"
-        docker.write_text(
-            '#!/usr/bin/env python3\n'
-            'import json, os, sys, time\n'
-            'from pathlib import Path\n'
-            'if sys.argv[1] != "run": sys.exit(0)\n'
-            'args = sys.argv[1:]\n'
-            'mount = next(x for x in args if x.startswith("type=bind,source="))\n'
-            'source = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])\n'
-            'hosts = source / "hosts.yml"\n'
-            'data = {"args": args, "source": str(source), "config": hosts.read_text(), '
-            '"dir_mode": source.stat().st_mode & 0o777, '
-            '"file_mode": hosts.stat().st_mode & 0o777, '
-            '"schema": (source / "config.yml").read_text(), '
-            '"schema_mode": (source / "config.yml").stat().st_mode & 0o777}\n'
-            'Path(os.environ["HOME"], "docker.json").write_text(json.dumps(data))\n'
-            'if os.environ.get("TEST_WAIT"): time.sleep(30)\n'
-            'sys.exit(int(os.environ.get("TEST_DOCKER_EXIT", "0")))\n'
-        )
+        docker = self.fake_bin / "docker"
+        docker.write_text(DOCKER)
         docker.chmod(0o755)
         self.env = dict(os.environ, HOME=str(self.home),
-                        PATH=f"{fake_bin}:{os.environ['PATH']}", TMPDIR=str(self.tmp_root),
+                        PATH=f"{self.fake_bin}:{os.environ['PATH']}", TMPDIR=str(self.tmp_root),
                         GH_TOKEN="stale-env-token", GITHUB_TOKEN="stale-env-token")
         for key in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "WAYLAND_DISPLAY"):
             self.env.pop(key, None)
-        subprocess.run(["bash", "install.sh"], cwd=ROOT, env=self.env,
+        subprocess.run(["bash", "install.sh", "--skip-build"], cwd=ROOT, env=self.env,
                        check=True, capture_output=True)
         self.log = self.home / "docker.json"
-        self.work = self.home / "project"
-        self.work.mkdir()
-        self.store = self.home / ".config/devtainer/github"
-        self.store.mkdir(parents=True, mode=0o700)
-        self.credential = self.store / "default.credential"
-        self.credential.write_text(f"test-user\n{TOKEN}\n")
-        self.credential.chmod(0o600)
+        self.calls = self.home / "docker-calls.jsonl"
+        self.state_file = self.home / "docker-state.json"
+        self.store = self.profile_dir("dev")
+        self.credential = self.seed_profile("dev", TOKEN)
+        self.seed_profile("personal", PERSONAL_TOKEN)
 
-    def launch(self, launcher, overrides=None):
+    def profile_dir(self, session):
+        return self.home / ".config/devtainer/sessions" / session
+
+    def seed_profile(self, session, token):
+        store = self.profile_dir(session)
+        store.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = store / "github.credential"
+        path.write_text(f"test-user\n{token}\n")
+        path.chmod(0o600)
+        return path
+
+    def volume(self, session):
+        return f"devtainer-{os.getuid()}-{session}-home"
+
+    def launch(self, session="dev", overrides=None, command=("gh", "auth", "status")):
         return subprocess.run(
-            ["bash", "-x", str(self.home / "bin" / launcher), "gh", "auth", "status"],
+            ["bash", "-x", str(self.home / "bin/dev"), "--session", session, *command],
             cwd=self.work, env=dict(self.env, **(overrides or {})), capture_output=True, text=True,
         )
 
     def assert_clean(self):
         self.assertEqual(list(self.tmp_root.glob("devtainer-gh.*")), [])
 
-    def test_snapshot_mount_permissions_overrides_and_cleanup(self):
-        host_config = self.home / "host gh"
-        host_config.mkdir()
-        sentinel = host_config / "hosts.yml"
-        sentinel.write_text("host config must remain untouched")
-        for launcher in ("dev", "devil"):
-            for override in ({}, {"GH_CONFIG_DIR": str(host_config)},
-                             {"XDG_CONFIG_HOME": str(self.home / "xdg")}):
-                with self.subTest(launcher=launcher, override=override):
-                    result = self.launch(launcher, override)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    data = json.loads(self.log.read_text())
-                    target = f"/home/{subprocess.check_output(['id', '-un'], text=True).strip()}/.config/gh"
-                    self.assertIn(f"type=bind,source={data['source']},target={target},readonly", data["args"])
-                    self.assertIn(f"GH_CONFIG_DIR={target}", data["args"])
-                    self.assertEqual(data["dir_mode"], 0o700)
-                    self.assertEqual(data["file_mode"], 0o600)
-                    self.assertEqual(data["schema_mode"], 0o600)
-                    self.assertEqual(data["schema"], "version: 1\n")
-                    self.assertEqual(data["config"], f'github.com:\n    user: "test-user"\n    oauth_token: "{TOKEN}"\n    git_protocol: https\n    users:\n        "test-user":\n            oauth_token: "{TOKEN}"\n')
-                    self.assertNotIn(str(host_config), " ".join(data["args"]))
-                    self.assertNotIn(TOKEN, result.stdout + result.stderr + " ".join(data["args"]))
-                    self.assertFalse((self.home / "gh.json").exists())
-                    self.assertEqual(sentinel.read_text(), "host config must remain untouched")
-                    self.assert_clean()
+    def test_sessions_have_distinct_homes_and_credentials(self):
+        for session, token in (("dev", TOKEN), ("personal", PERSONAL_TOKEN)):
+            with self.subTest(session=session):
+                result = self.launch(session)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads(self.log.read_text())
+                target = f"/home/{subprocess.check_output(['id', '-un'], text=True).strip()}/.config/gh"
+                self.assertIn(f"type=bind,source={data['source']},target={target},readonly", data["args"])
+                self.assertIn(f"GH_CONFIG_DIR={target}", data["args"])
+                self.assertIn(f"{self.volume(session)}:/home", data["args"])
+                self.assertIn(f"DEVTAINER_SESSION={session}", data["args"])
+                self.assertIn(f"devtainer.session={session}", data["args"])
+                self.assertEqual(data["dir_mode"], 0o700)
+                self.assertEqual(data["file_mode"], 0o600)
+                self.assertEqual(data["schema_mode"], 0o600)
+                self.assertEqual(data["schema"], "version: 1\n")
+                self.assertIn(token, data["config"])
+                other = PERSONAL_TOKEN if session == "dev" else TOKEN
+                self.assertNotIn(other, data["config"])
+                self.assertNotIn(token, result.stdout + result.stderr + " ".join(data["args"]))
+                self.assertFalse((self.home / "gh.json").exists())
+                mounts = [data['args'][i+1] for i, a in enumerate(data['args']) if a == '-v']
+                self.assertEqual(mounts, [f"{self.volume(session)}:/home", f"{self.work}:/workspace"])
+                self.assert_clean()
+        self.assertFalse((self.home / "bin/devil").exists())
+        self.assertFalse((self.home / ".claude").exists())
 
-    def test_unavailable_and_malformed_credentials_fail_closed(self):
-        for launcher in ("dev", "devil"):
-            for content in (None, "", "test-user\nghp_CLASSIC\n",
-                            "test-user\ngithub_pat_BAD;yaml\n", "bad: user\n" + TOKEN + "\n"):
-                with self.subTest(launcher=launcher, content=content):
-                    self.credential.unlink(missing_ok=True)
-                    if content is not None:
-                        self.credential.write_text(content)
-                        self.credential.chmod(0o600)
-                    result = self.launch(launcher)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertFalse(self.log.exists())
-                    self.assertFalse((self.home / "gh.json").exists())
-                    self.assertNotIn(TOKEN, result.stdout + result.stderr)
-                    self.assert_clean()
-
-    def test_named_token_and_private_file_requirement(self):
-        named = self.store / "office.credential"
-        named.write_text(f"test-user\n{TOKEN}\n")
-        named.chmod(0o600)
-        for launcher in ("dev", "devil"):
-            result = subprocess.run(
-                [str(self.home / "bin" / launcher), "--github-token", "office", "gh", "auth", "status"],
-                cwd=self.work, env=self.env, capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_missing_profile_never_uses_other_session_or_host_login(self):
+        legacy = self.home / ".config/devtainer/github"
+        legacy.mkdir(mode=0o700)
+        (legacy / "default.credential").write_text(f"test-user\n{TOKEN}\n")
+        (legacy / "default.credential").chmod(0o600)
+        (legacy / "default.token").write_text(TOKEN + "\n")
+        for session in ("dev", "personal"):
+            path = self.profile_dir(session) / "github.credential"
+            original = path.read_bytes()
+            path.unlink()
+            result = self.launch(session)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"--session {session} setup-github", result.stderr)
+            self.assertFalse(self.log.exists())
+            self.assertFalse((self.home / "gh.json").exists())
+            path.write_bytes(original)
+            path.chmod(0o600)
             self.assert_clean()
-        self.log.unlink()
-        self.credential.chmod(0o644)
-        result = self.launch("dev")
-        self.assertNotEqual(result.returncode, 0)
+
+    def test_malformed_credentials_and_unsafe_permissions_fail_closed(self):
+        for content in ("", "test-user\nghp_CLASSIC\n", "test-user\ngithub_pat_BAD;yaml\n", "bad: user\n" + TOKEN + "\n"):
+            self.credential.write_text(content)
+            result = self.launch()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.log.exists())
+            self.assert_clean()
+        self.seed_profile("dev", TOKEN).chmod(0o644)
+        self.assertNotEqual(self.launch().returncode, 0)
         self.assertFalse(self.log.exists())
 
-    def test_credentials_cannot_be_exposed_through_workspace(self):
-        for launcher in ("dev", "devil"):
-            result = self.launch(launcher, {"TMPDIR": str(self.work)})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("exposed through a host directory mount", result.stderr)
-            self.assertFalse(self.log.exists())
-            self.assertFalse((self.home / "gh.json").exists())
-            self.assertEqual(list(self.work.glob("devtainer-gh.*")), [])
-
-    def test_credentials_cannot_be_exposed_through_other_host_mounts(self):
-        for relative in (".claude", ".cache/devtainer", ".config/nvim"):
-            root = self.home / relative
-            result = self.launch("dev", {"TMPDIR": str(root)})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("exposed through a host directory mount", result.stderr)
-            self.assertFalse(self.log.exists())
-            self.assertFalse((self.home / "gh.json").exists())
-            self.assertEqual(list(root.glob("devtainer-gh.*")), [])
+    def test_workspace_cannot_expose_credentials(self):
+        result = self.launch(overrides={"TMPDIR": str(self.work)})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exposed through a host directory mount", result.stderr)
+        self.assertEqual(list(self.work.glob("devtainer-gh.*")), [])
+        result = subprocess.run([str(self.home / "bin/dev"), "true"], cwd=self.home,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("credential store", result.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_container_failure_preserves_status_and_cleans_up(self):
-        for launcher in ("dev", "devil"):
-            result = self.launch(launcher, {"TEST_DOCKER_EXIT": "42"})
-            self.assertEqual(result.returncode, 42, result.stderr)
-            self.assert_clean()
+        result = self.launch(overrides={"TEST_DOCKER_EXIT": "42"})
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assert_clean()
 
     def test_termination_cleans_up(self):
-        for launcher in ("dev", "devil"):
-            self.log.unlink(missing_ok=True)
-            with subprocess.Popen(
-                [str(self.home / "bin" / launcher), "gh", "auth", "status"],
-                cwd=self.work, env=dict(self.env, TEST_WAIT="1"),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-            ) as process:
-                try:
-                    deadline = time.monotonic() + 5
-                    while not self.log.exists():
-                        if time.monotonic() > deadline:
-                            self.fail("launcher did not start Docker")
-                        time.sleep(0.02)
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=5)
-                    self.assertEqual(process.returncode, 143)
-                    self.assert_clean()
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+        with subprocess.Popen(
+            [str(self.home / "bin/dev"), "true"], cwd=self.work,
+            env=dict(self.env, TEST_WAIT="1"), stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        ) as process:
+            try:
+                deadline = time.monotonic() + 5
+                while not self.log.exists():
+                    if time.monotonic() > deadline:
+                        self.fail("launcher did not start Docker")
+                    time.sleep(0.02)
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+                self.assertEqual(process.returncode, 143)
+                self.assert_clean()
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
 
 
 if __name__ == "__main__":

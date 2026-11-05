@@ -39,12 +39,14 @@ ENV LC_CTYPE=C.UTF-8
 # Base tools:
 # - ca-certificates/curl/git: needed for nvm/npm/binary CLI/dev workflows
 # - bash: explicit shell
+# - bubblewrap/socat: Claude Code nested sandbox dependencies
 # - build-essential/pkg-config: useful for native npm packages/dev builds
 # - lib*/xz-utils/tk-dev: CPython build dependencies for pyenv
 # - ripgrep/fd-find/neovim/shellcheck/jq/yamllint: useful inside the container
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
+        bubblewrap \
         build-essential \
         ca-certificates \
         curl \
@@ -66,6 +68,7 @@ RUN apt-get update \
         pkg-config \
         ripgrep \
         shellcheck \
+        socat \
         tk-dev \
         tmux \
         unzip \
@@ -344,7 +347,7 @@ vim.opt.autoread = true
 vim.opt.clipboard = "unnamedplus"
 vim.opt.encoding = "utf-8"
 
--- When the launcher mounts the host Wayland socket (dev/devil set
+-- When the launcher mounts the host Wayland socket (dev sets
 -- WAYLAND_DISPLAY), let Neovim's default provider use wl-copy/wl-paste so
 -- yanks land directly in the host clipboard. Otherwise fall back to OSC 52
 -- escape sequences, which require a terminal emulator that supports them.
@@ -415,19 +418,17 @@ fi
 # Use the mounted gh login even when a persistent home exports stale tokens.
 unset GH_TOKEN GITHUB_TOKEN
 export GH_CONFIG_DIR="$HOME/.config/gh"
-if [[ "${DEVIL_MODE:-}" == "true" ]]; then
-  export PATH="/usr/local/bin:$PATH"
-  nvim_plugin_dir="$HOME/.config/nvim/plugin"
-  nvim_utf8_plugin="$nvim_plugin_dir/devtainer-utf8.lua"
-  mkdir -p "$nvim_plugin_dir"
-  if [[ ! -f "$nvim_utf8_plugin" ]] || grep -Fq "Managed by devtainer." "$nvim_utf8_plugin"; then
-    cat > "$nvim_utf8_plugin" <<'LUA'
+export PATH="/usr/local/bin:$PATH"
+nvim_plugin_dir="$HOME/.config/nvim/plugin"
+nvim_utf8_plugin="$nvim_plugin_dir/devtainer-utf8.lua"
+mkdir -p "$nvim_plugin_dir"
+if [[ ! -f "$nvim_utf8_plugin" ]] || grep -Fq "Managed by devtainer." "$nvim_utf8_plugin"; then
+  cat > "$nvim_utf8_plugin" <<'LUA'
 -- Managed by devtainer.
 vim.opt.encoding = "utf-8"
 vim.opt.fileencoding = "utf-8"
 vim.opt.fileencodings = { "ucs-bom", "utf-8", "default", "latin1" }
 LUA
-  fi
 fi
 # buoy.nvim injects its own editor-context guidance when it launches the
 # agent (Claude Code via --append-system-prompt, Codex via app-server
@@ -444,8 +445,7 @@ chmod +x /usr/local/bin/devtainer-entrypoint
 EOF
 
 # Install buoy.nvim from GitHub so Neovim auto-loads it in every devtainer mode.
-# It lives in the system site dir (not under $HOME), so the read-only host
-# ~/.config/nvim and ~/.local/share/nvim mounts used by `dev` never shadow it.
+# It lives in the system site directory outside the per-session home volume.
 RUN git clone --depth 1 --branch "${BUOY_VERSION}" https://github.com/cmfcruz/buoy.nvim \
     /usr/local/share/nvim/site/pack/devtainer/start/buoy.nvim
 
@@ -465,8 +465,7 @@ if not ok then
   return
 end
 
--- dev defaults its agent to Claude Code; devil sets DEVTAINER_AGENT=codex
--- in its launcher. Set DEVTAINER_AGENT explicitly to override either.
+-- All sessions default to Claude Code. Set DEVTAINER_AGENT=codex to use Codex.
 local agent = vim.env.DEVTAINER_AGENT == "codex" and "codex" or "claude"
 buoy.setup({ agent = agent })
 LUA

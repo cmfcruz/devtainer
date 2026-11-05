@@ -8,11 +8,18 @@ changes that also affect the overall security posture. Make no changes initially
 Intended behavior:
 
 - The builder's username, UID, GID, and home are used inside the image.
+- dev defaults to session dev; --session personal selects a separate persistent
+  home volume and host GitHub profile. Subcommands always follow the session.
+- No previous volumes or profiles are migrated. Host Claude/Git/Neovim state,
+  caches, and GPG sockets are not mounted. Wayland is still shared when available.
+- reset-home checks volume labels and attachments, takes an exclusive per-session
+  lock, and requires typing the session name. It removes only that home volume.
+  Normal launches hold shared locks; host GitHub profiles and workspaces are kept.
 - Host-only setup-github opens a fine-grained PAT form prefilled with read access
   to Contents, Actions, and Pull requests. Hidden input and isolated gh API login
-  validation precede atomic saving of a named credential profile (600/700).
+  validation precede atomic saving of the selected session credential (600/700).
 - Setup validates identity, not grants; the user must select only read permissions.
-- Both launchers read only the selected dedicated profile. Missing/unsafe profiles
+- The launcher read only the selected dedicated profile. Missing/unsafe profiles
   fail closed; no fallback to the full-access host login or token environment exists.
 - They create a unique temporary directory (700) and hosts.yml/config.yml (600),
   mount it read-only at the container user's ~/.config/gh, and set GH_CONFIG_DIR.
@@ -23,7 +30,7 @@ Intended behavior:
   after loading the persistent home environment.
 - The launcher removes temporary credentials after exit and handled signals.
 
-Inspect install.sh, generated dev/devil launchers, the Dockerfile/entrypoint,
+Inspect install.sh, the generated dev launcher and scripts/ fragments, the Dockerfile/entrypoint,
 tests, security profiles, mounts, persistent home handling, and documentation.
 Use synthetic credentials only. Never print, retrieve, upload, or use real secrets.
 
@@ -31,7 +38,8 @@ Assess:
 
 1. Credential leaks through tracing, logs, argv, exported environment, temporary
    files, Docker metadata, persistent volumes, build layers, and error paths.
-2. Temporary file permissions, races, symlinks, malicious TMPDIR values, mount
+2. Session/home/profile separation, reset scope, volume ownership, locks, confirmation,
+   temporary file permissions, races, symlinks, malicious TMPDIR values, mount
    parsing, concurrent launches, cleanup on errors/signals, and SIGKILL limitations.
 3. YAML/shell injection, malformed token handling, host credential selection,
    unexpected config overrides, gh version compatibility, and account rotation.
@@ -44,7 +52,7 @@ Assess:
 
 Run safe, relevant tests after inspecting them. Where Docker is available, propose
 or run container checks using fake credentials, including read-only mounting and
-ensuring no credential file persists in devil's home volume after exit.
+ensuring no credential file persists in a session's home volume after exit.
 
 Report concrete findings first, ordered by severity, with file/line references,
 attack prerequisites, impact, reproduction using fake secrets, and a minimal fix.

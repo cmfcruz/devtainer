@@ -1,61 +1,65 @@
-"""Check launcher defaults using a fake Docker CLI."""
+"""Check session parsing, command forwarding, and installation behavior."""
 
 import json
-import os
-from pathlib import Path
 import subprocess
-import tempfile
 import unittest
 
-
-ROOT = Path(__file__).resolve().parents[1]
+import test_host_gh_config as fixtures
 
 
 class LauncherDefaultsTest(unittest.TestCase):
-    def test_tmux_session_names_and_command_override(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            fake_bin = home / "fake-bin"
-            fake_bin.mkdir()
-            docker = fake_bin / "docker"
-            docker.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json, os, sys\n"
-                "from pathlib import Path\n"
-                "Path(os.environ['HOME'], 'docker.json').write_text(json.dumps(sys.argv[1:]))\n"
-            )
-            docker.chmod(0o755)
-            gh = fake_bin / "gh"
-            gh.write_text("#!/bin/sh\nif [ \"$1\" = config ]; then echo test-user; else echo gho_FAKE_TEST_CREDENTIAL; fi\n")
-            gh.chmod(0o755)
-            store = home / ".config/devtainer/github"
-            store.mkdir(parents=True, mode=0o700)
-            credential = store / "default.credential"
-            credential.write_text("test-user\ngithub_pat_FAKE_TEST_CREDENTIAL\n")
-            credential.chmod(0o600)
-            env = dict(os.environ, HOME=directory,
-                       PATH=f"{fake_bin}:{os.environ['PATH']}")
-            for key in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "WAYLAND_DISPLAY"):
-                env.pop(key, None)
-            subprocess.run(["bash", "install.sh"], cwd=ROOT, env=env,
-                           check=True, capture_output=True)
-            for name, session in (("my-project", "my-project"),
-                                  ("my.app:work", "my_app_work"),
-                                  ("project with spaces", "project with spaces")):
-                work = home / name
-                work.mkdir()
-                for launcher in ("dev", "devil"):
-                    for command in ([], ["nvim", "."]):
-                        with self.subTest(name=name, launcher=launcher, command=command):
-                            result = subprocess.run(
-                                [str(home / "bin" / launcher), *command],
-                                cwd=work, env=env, capture_output=True, text=True,
-                            )
-                            self.assertEqual(result.returncode, 0, result.stderr)
-                            args = json.loads((home / "docker.json").read_text())
-                            expected = command or ["tmux", "new-session", "-A", "-s",
-                                                   session, "-c", "/workspace"]
-                            self.assertEqual(args[-len(expected):], expected)
+    def setUp(self):
+        self.fixture = fixtures.HostGhConfigTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_tmux_names_and_command_override(self):
+        f = self.fixture
+        for name, tmux in (("my-project", "my-project"), ("my.app:work", "my_app_work"),
+                           ("project with spaces", "project with spaces")):
+            work = f.home / name
+            work.mkdir()
+            for options in ([], ["--session", "dev"], ["--session", "personal"]):
+                for command in ([], ["nvim", "."], ["bash", "-lc", "printf test"]):
+                    with self.subTest(name=name, options=options, command=command):
+                        result = subprocess.run(
+                            [str(f.home / "bin/dev"), *options, *command], cwd=work,
+                            env=f.env, capture_output=True, text=True,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        args = json.loads(f.log.read_text())["args"]
+                        expected = command or ["tmux", "new-session", "-A", "-s", tmux, "-c", "/workspace"]
+                        self.assertEqual(args[-len(expected):], expected)
+                        session = options[-1] if options else "dev"
+                        self.assertIn(f"{f.volume(session)}:/home", args)
+
+    def test_invalid_session_names_and_options_do_not_call_docker(self):
+        f = self.fixture
+        for args in (["--session"], ["--session", ""], ["--session", "../dev"],
+                     ["--session", "personal/dev"], ["--session", "a" * 49],
+                     ["--github-token", "personal"]):
+            result = subprocess.run([str(f.home / "bin/dev"), *args], cwd=f.work,
+                                    env=f.env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(f.calls.exists())
+        result = subprocess.run([str(f.home / "bin/dev"), "--help"], env=f.env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--session", result.stdout)
+        self.assertFalse(f.calls.exists())
+
+    def test_install_retires_only_generated_legacy_launcher(self):
+        f = self.fixture
+        legacy = f.home / "bin/devil"
+        legacy.write_text('#!/bin/bash\nvolume_name="devil-test"\ndocker_args=()\n')
+        subprocess.run(["bash", "install.sh", "--skip-build"], cwd=fixtures.ROOT,
+                       env=f.env, check=True, capture_output=True)
+        self.assertFalse(legacy.exists())
+        legacy.write_text('#!/bin/bash\necho my-own-command\n')
+        subprocess.run(["bash", "install.sh", "--skip-build"], cwd=fixtures.ROOT,
+                       env=f.env, check=True, capture_output=True)
+        self.assertTrue(legacy.exists())
+        self.assertFalse(f.state_file.exists(), "installation must not modify old volumes")
 
 
 if __name__ == "__main__":

@@ -27,10 +27,10 @@ class GitHubSetupTest(unittest.TestCase):
             )
             browser.chmod(0o755)
 
-    def setup_token(self, launcher, token, name="default", overrides=None):
+    def setup_token(self, session, token, overrides=None):
         master, slave = pty.openpty()
         process = subprocess.Popen(
-            ["bash", "-x", str(self.home / "bin" / launcher), "setup-github", name],
+            ["bash", "-x", str(self.home / "bin/dev"), "--session", session, "setup-github"],
             cwd=self.fixture.work, env=dict(self.env, **(overrides or {})),
             stdin=slave, stdout=slave, stderr=slave,
         )
@@ -61,17 +61,17 @@ class GitHubSetupTest(unittest.TestCase):
             os.close(master)
 
     def test_hidden_setup_named_selection_and_replacement(self):
-        for launcher in ("dev", "devil"):
+        for session in ("dev", "personal"):
             token = fixtures.TOKEN + "_REPLACED"
-            status, output = self.setup_token(launcher, token, "office")
+            status, output = self.setup_token(session, token)
             self.assertEqual(status, 0, output)
             self.assertNotIn(token, output)
-            credential = self.fixture.store / "office.credential"
+            credential = self.fixture.profile_dir(session) / "github.credential"
             self.assertEqual(credential.read_text(), f"test-user\n{token}\n")
             self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
             self.assertEqual(self.fixture.store.stat().st_mode & 0o777, 0o700)
             self.assertEqual(list(self.fixture.store.glob(".setup.*")), [])
-            self.assertFalse(self.fixture.log.exists(), "setup must not run Docker")
+            self.assertFalse(self.fixture.calls.exists(), "setup must not run Docker")
             for permission in ("contents=read", "actions=read", "pull_requests=read", "expires_in=30"):
                 self.assertIn(permission, (self.home / "browser.log").read_text())
 
@@ -92,17 +92,17 @@ class GitHubSetupTest(unittest.TestCase):
             self.assertFalse(self.fixture.log.exists())
 
     def test_browser_failure_still_allows_setup(self):
-        status, output = self.setup_token("devil", fixtures.TOKEN,
+        status, output = self.setup_token("personal", fixtures.TOKEN,
                                          overrides={"TEST_BROWSER_EXIT": "1"})
         self.assertEqual(status, 0, output)
         self.assertIn("Open the URL above manually", output)
 
     def test_noninteractive_setup_and_invalid_names(self):
-        for launcher in ("dev", "devil"):
-            for args in (("setup-github",), ("setup-github", "../escape"),
+        for session in ("dev", "personal"):
+            for args in (("setup-github",), ("setup-github", "extra"),
                          ("--github-token",), ("--github-token", "../escape")):
                 result = subprocess.run(
-                    [str(self.home / "bin" / launcher), *args],
+                    [str(self.home / "bin/dev"), "--session", session, *args],
                     cwd=self.fixture.work, env=self.env, capture_output=True, text=True,
                 )
                 self.assertNotEqual(result.returncode, 0)

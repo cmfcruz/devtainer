@@ -4,14 +4,17 @@ set -euo pipefail
 IMAGE_NAME="${IMAGE_NAME:-devtainer:26.04}"
 
 build_flags=()
+no_cache=false
+skip_build=false
 
 usage() {
   cat << EOF
-Usage: ${0##*/} [--no-cache]
+Usage: ${0##*/} [--no-cache] [--skip-build]
 
   --no-cache   Build the image without using Docker's layer cache. Use this to
                force a fresh \`git clone\` of pinned dependencies (e.g. buoy.nvim)
                when the pinned branch has moved but the ref name is unchanged.
+  --skip-build Regenerate host launchers without rebuilding the image.
   -h, --help   Show this help and exit.
 EOF
 }
@@ -20,6 +23,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-cache)
       build_flags+=(--no-cache)
+      no_cache=true
+      shift
+      ;;
+    --skip-build)
+      skip_build=true
       shift
       ;;
     -h | --help)
@@ -34,266 +42,57 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${skip_build}" == true && "${no_cache}" == true ]]; then
+  echo "--skip-build cannot be combined with --no-cache" >&2
+  exit 1
+fi
+
 USERNAME="$(id -un)"
 USER_UID="$(id -u)"
 USER_GID="$(id -g)"
 
-echo "Building ${IMAGE_NAME} using USERNAME=${USERNAME}, USER_UID=${USER_UID}, USER_GID=${USER_GID}"
-
-docker build \
-  ${build_flags[@]+"${build_flags[@]}"} \
-  --build-arg USERNAME="${USERNAME}" \
-  --build-arg USER_UID="${USER_UID}" \
-  --build-arg USER_GID="${USER_GID}" \
-  -f Dockerfile \
-  -t "${IMAGE_NAME}" \
-  .
+if [[ "${skip_build}" == true ]]; then
+  echo "Skipping image build; regenerating launchers for ${IMAGE_NAME}"
+else
+  echo "Building ${IMAGE_NAME} using USERNAME=${USERNAME}, USER_UID=${USER_UID}, USER_GID=${USER_GID}"
+  docker build \
+    ${build_flags[@]+"${build_flags[@]}"} \
+    --build-arg USERNAME="${USERNAME}" \
+    --build-arg USER_UID="${USER_UID}" \
+    --build-arg USER_GID="${USER_GID}" \
+    -f Dockerfile \
+    -t "${IMAGE_NAME}" \
+    .
+fi
 
 BIN_DIR="${HOME}/bin"
 DEV_BIN="${BIN_DIR}/dev"
-DEVIL_BIN="${BIN_DIR}/devil"
-OLD_DEV_SECURE_BIN="${BIN_DIR}/dev-secure"
-WORK_DIR="/workspace"
-# Single host-side cache root mounted as the container's $HOME/.cache. Mounting
-# the cache root itself (rather than individual subdirs under it) keeps the
-# directory owned by this user inside the container: Docker creates missing
-# bind-mount *parents* as root, which left $HOME/.cache unwritable for tools
-# that use the XDG default and are not explicitly redirected below.
-CACHE_DIR="${HOME}/.cache/devtainer"
+SECCOMP_PROFILE_DIR="${HOME}/.config/devtainer"
+SECCOMP_PROFILE="${SECCOMP_PROFILE_DIR}/claude-sandbox-seccomp.json"
+mkdir -p "${BIN_DIR}" "${SECCOMP_PROFILE_DIR}"
+install -m 0644 security/claude-sandbox-seccomp.json "${SECCOMP_PROFILE}"
 
-mkdir -p "${BIN_DIR}" "${CACHE_DIR}" "${HOME}/.claude" "${HOME}/.config/nvim" "${HOME}/.local/share/nvim"
-touch "${HOME}/.gitconfig"
-touch "${HOME}/.gitmessage"
-touch "${HOME}/.tmux.conf"
-touch "${HOME}/.claude.json"
+# Quote install-time values as shell literals; generated dev has no repo dependency.
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'image_name=%q\n' "$IMAGE_NAME"
+  printf 'builder_uid=%q\n' "$USER_UID"
+  printf 'container_home=%q\n' "/home/$USERNAME"
+  printf 'seccomp_profile=%q\n' "$SECCOMP_PROFILE"
+  cat scripts/session-launcher.sh scripts/github-launcher.sh scripts/run-container.sh \
+    scripts/github-config.sh scripts/wayland.sh scripts/start-container.sh
+} > "$DEV_BIN"
+chmod +x "$DEV_BIN"
+echo "Installed $DEV_BIN. Use dev for session dev, or dev --session personal for a separate persistent home."
 
-GITHUB_LAUNCHER_SCRIPT=$(cat scripts/github-launcher.sh)
-
-DEFAULT_COMMAND_SCRIPT=$(
-  cat << 'SCRIPT'
-if [[ $# -eq 0 ]]; then
-  session_name="$(basename "$PWD")"
-  # tmux reserves periods and colons in session targets.
-  session_name="${session_name//[.:]/_}"
-  [[ "$session_name" != / ]] || session_name=workspace
-  set -- tmux new-session -A -s "$session_name" -c /workspace
-fi
-SCRIPT
-)
-
-DEVIL_COMMAND_SCRIPT="${DEFAULT_COMMAND_SCRIPT}"
-
-# Snapshot only the selected dedicated token; never fall back to the host login.
-GH_CONFIG_ARGS_SCRIPT=$(
-  cat << 'SCRIPT'
-# Disable tracing before retrieving or expanding any credential.
-gh_trace="$github_trace"
-set +x
-gh_config_tmp="$(mktemp -d "${TMPDIR:-/tmp}/devtainer-gh.XXXXXXXXXX")"
-cleanup_gh_config() {
-  rm -rf -- "$gh_config_tmp"
-}
-trap cleanup_gh_config EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-chmod 700 "$gh_config_tmp"
-# Prevent alternate access through /workspace or another host directory mount.
-gh_config_tmp="$(cd "$gh_config_tmp" && pwd -P)"
-for gh_mount_arg in "${docker_args[@]}"; do
-  gh_mount_source="${gh_mount_arg%%:*}"
-  [[ "$gh_mount_arg" == /*:* && -d "$gh_mount_source" ]] || continue
-  gh_mount_source="$(cd "$gh_mount_source" && pwd -P)"
-  if [[ "$gh_mount_source" == / || "$gh_config_tmp/" == "$gh_mount_source/"* ]]; then
-    printf 'devtainer: temporary credentials would be exposed through a host directory mount; set TMPDIR outside mounted directories.\n' >&2
-    exit 1
+# Retire only launchers carrying our old generated signatures. No volume migration.
+for legacy in "$BIN_DIR/devil" "$BIN_DIR/dev-secure"; do
+  if [[ -f "$legacy" ]] && grep -Fq 'docker_args=(' "$legacy" &&
+    { grep -Fq 'volume_name="devil-' "$legacy" || grep -Fq 'PRE_COMMIT_HOME=' "$legacy"; }; then
+    rm -f -- "$legacy"
+    echo "Removed obsolete generated launcher $legacy; its old volumes are untouched."
   fi
 done
-if [[ ! -f "$github_file" || -L "$github_file" || ! -O "$github_file" || -L "$github_dir" || ! -O "$github_dir" ]]; then
-  printf 'devtainer: dedicated token "%s" is missing or unsafe. Run: %s setup-github %s\n' "$github_name" "${0##*/}" "$github_name" >&2
-  exit 1
-fi
-if [[ "$(stat -c %a "$github_file")" != 600 || "$(stat -c %a "$github_dir")" != 700 ]]; then
-  printf 'devtainer: dedicated token file must have mode 600. Run setup-github again.\n' >&2
-  exit 1
-fi
-# The persistent store must not be reachable through another container mount.
-github_store="$(cd "$github_dir" && pwd -P)/${github_name}.credential"
-for gh_mount_arg in "${docker_args[@]}"; do
-  gh_mount_source="${gh_mount_arg%%:*}"
-  [[ "$gh_mount_arg" == /*:* && -d "$gh_mount_source" ]] || continue
-  gh_mount_source="$(cd "$gh_mount_source" && pwd -P)"
-  if [[ "$gh_mount_source" == / || "$github_store" == "$gh_mount_source/"* ]]; then
-    printf 'devtainer: the dedicated credential store would be exposed through a host directory mount. Launch from a project directory outside that store.\n' >&2
-    exit 1
-  fi
-done
-mapfile -t gh_credential < "$github_file"
-if [[ "${#gh_credential[@]}" != 2 ]]; then
-  printf 'devtainer: malformed dedicated credential. Run setup-github again.\n' >&2
-  exit 1
-fi
-gh_user="${gh_credential[0]}"
-gh_token="${gh_credential[1]}"
-if [[ ! "$gh_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ || ! "$gh_token" =~ ^github_pat_[a-zA-Z0-9_]+$ ]]; then
-  printf 'devtainer: malformed dedicated credential. Run setup-github again.\n' >&2
-  exit 1
-fi
-(umask 077; printf 'github.com:\n    user: "%s"\n    oauth_token: "%s"\n    git_protocol: https\n    users:\n        "%s":\n            oauth_token: "%s"\n' "$gh_user" "$gh_token" "$gh_user" "$gh_token" > "$gh_config_tmp/hosts.yml")
-# gh auth status migrates configs without a schema marker, even with users set.
-(umask 077; printf 'version: 1\n' > "$gh_config_tmp/config.yml")
-unset gh_token gh_user gh_credential
-docker_args+=(
-  --mount "type=bind,source=$gh_config_tmp,target=$container_gh_config,readonly"
-  -e "GH_CONFIG_DIR=$container_gh_config"
-)
-if [[ "$gh_trace" == true ]]; then
-  set -x
-fi
-SCRIPT
-)
-
-# Mount the host Wayland compositor socket so clipboard tools inside the
-# container (wl-copy/wl-paste, used by Neovim's clipboard provider) talk to
-# the host clipboard. WAYLAND_DISPLAY is set to an absolute path (supported
-# by libwayland) so XDG_RUNTIME_DIR stays untouched inside the container.
-# Skipped silently when no Wayland session is present.
-WAYLAND_ARGS_SCRIPT=$(
-  cat << 'SCRIPT'
-host_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-host_wayland_socket="${host_runtime_dir}/${WAYLAND_DISPLAY:-}"
-if [[ "${WAYLAND_DISPLAY:-}" == /* ]]; then
-  host_wayland_socket="${WAYLAND_DISPLAY}"
-fi
-if [[ -n "${WAYLAND_DISPLAY:-}" && -S "${host_wayland_socket}" ]]; then
-  docker_args+=(
-    -e WAYLAND_DISPLAY=/run/host-wayland/wayland-0
-    -v "${host_wayland_socket}:/run/host-wayland/wayland-0"
-  )
-fi
-SCRIPT
-)
-
-# Mount the host GPG agent extra socket and public keyring files so commits and
-# tags can be signed inside the container using the host GPG agent. Private key
-# files are never mounted; signing runs in the host agent over the extra socket.
-# Skipped with a warning when the agent's extra socket is not available.
-GPG_ARGS_SCRIPT=$(
-  cat << 'SCRIPT'
-gpg_dir="$HOME/.gnupg"
-container_agent_socket="$gpg_dir/S.gpg-agent"
-host_extra_socket="$(gpgconf --list-dirs agent-extra-socket 2>/dev/null || true)"
-if [[ -S "$host_extra_socket" ]]; then
-  docker_args+=(-v "$host_extra_socket:$container_agent_socket")
-else
-  printf 'dev: warning: host GPG extra socket not found; signing will not work until the agent is running.\n' >&2
-fi
-
-if [[ -f "$gpg_dir/pubring.kbx" ]]; then
-  docker_args+=(-v "$gpg_dir/pubring.kbx:$gpg_dir/pubring.kbx:ro")
-fi
-
-if [[ -f "$gpg_dir/trustdb.gpg" ]]; then
-  docker_args+=(-v "$gpg_dir/trustdb.gpg:$gpg_dir/trustdb.gpg:ro")
-fi
-SCRIPT
-)
-
-echo "Installing ${DEV_BIN}, which starts an interactive Claude Code-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.claude and ${HOME}/.claude.json mounted into the same home paths inside the container, Git and tmux config plus Neovim config and data mounted read-only, a dedicated host cache root mounted as \$HOME/.cache, and the host GPG agent extra socket and public keyring mounted for code signing when available. Run \`dev\` to open a directory-named tmux session, or append a command like \`dev claude\` to override it."
-cat > "${DEV_BIN}" << EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-${GITHUB_LAUNCHER_SCRIPT}
-
-${DEFAULT_COMMAND_SCRIPT}
-
-docker_args=(
-  --rm
-  -it
-  --cap-drop ALL
-  --security-opt no-new-privileges
-  --hostname "\$(basename "\$PWD")"
-  -e TERM=xterm-256color
-  -e GPG_TTY=/dev/tty
-  -e GNUPGHOME="\$HOME/.gnupg"
-  -e PRE_COMMIT_HOME="\$HOME/.cache/pre-commit"
-  -e NPM_CONFIG_CACHE="\$HOME/.cache/npm"
-  -e PIP_CACHE_DIR="\$HOME/.cache/pip"
-  -v "\$PWD:${WORK_DIR}"
-  -v "\$HOME/.claude:\$HOME/.claude"
-  -v "\$HOME/.claude.json:\$HOME/.claude.json"
-  -v "\$HOME/.gitconfig:\$HOME/.gitconfig:ro"
-  -v "\$HOME/.gitmessage:\$HOME/.gitmessage:ro"
-  -v "\$HOME/.tmux.conf:\$HOME/.tmux.conf:ro"
-  -v "\$HOME/.config/nvim:\$HOME/.config/nvim:ro"
-  -v "\$HOME/.local/share/nvim:\$HOME/.local/share/nvim:ro"
-  -v "${CACHE_DIR}:\$HOME/.cache"
-)
-
-container_gh_config="/home/${USERNAME}/.config/gh"
-
-${GH_CONFIG_ARGS_SCRIPT}
-
-${WAYLAND_ARGS_SCRIPT}
-
-${GPG_ARGS_SCRIPT}
-
-docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
-EOF
-
-chmod +x "${DEV_BIN}"
-
-echo "Installed dev at ${DEV_BIN}"
-
-echo "Installing ${DEVIL_BIN}, which starts an interactive dev container with Docker volume devil-${USERNAME} mounted as /home for persistent, self-contained container home state. Run \`devil\` to open a directory-named tmux session, or append a command like \`devil codex\` to override it."
-cat > "${DEVIL_BIN}" << EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-${GITHUB_LAUNCHER_SCRIPT}
-
-${DEVIL_COMMAND_SCRIPT}
-
-volume_name="devil-${USERNAME}"
-docker volume create "\$volume_name" >/dev/null
-
-docker_args=(
-  --rm
-  -it
-  --cap-drop ALL
-  --security-opt no-new-privileges
-  --hostname "\$(basename "\$PWD")"
-  -e TERM=xterm-256color
-  -e DEVIL_MODE=true
-  -e DEVTAINER_AGENT=codex
-  -v "\$volume_name:/home"
-  -v "\$PWD:${WORK_DIR}"
-)
-
-container_gh_config="/home/${USERNAME}/.config/gh"
-
-${GH_CONFIG_ARGS_SCRIPT}
-
-${WAYLAND_ARGS_SCRIPT}
-
-docker run "\${docker_args[@]}" "${IMAGE_NAME}" "\$@"
-EOF
-
-chmod +x "${DEVIL_BIN}"
-
-echo "Installed devil at ${DEVIL_BIN}"
-
-if [[ -f "${OLD_DEV_SECURE_BIN}" ]]; then
-  if grep -Fq 'PRE_COMMIT_HOME' "${OLD_DEV_SECURE_BIN}" &&
-    grep -Fq 'NPM_CONFIG_CACHE' "${OLD_DEV_SECURE_BIN}" &&
-    grep -Fq 'docker_args=(' "${OLD_DEV_SECURE_BIN}"; then
-    rm -f "${OLD_DEV_SECURE_BIN}"
-    echo "Removed old dev-secure launcher at ${OLD_DEV_SECURE_BIN}"
-  else
-    echo "Found ${OLD_DEV_SECURE_BIN}, but it does not look like a devtainer-generated launcher; leaving it in place."
-  fi
-fi
 
 BASHRC="${HOME}/.bashrc"
 touch "${BASHRC}"

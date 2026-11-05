@@ -28,12 +28,12 @@ class GitHubAuthTest(unittest.TestCase):
                         f"            oauth_token: {stored}\n")
             hosts.write_text(original)
             (config / "config.yml").write_text("version: 1\n")
-            # A persistent devil home can reload tokens after Docker starts.
+            # A persistent session home can reload tokens after Docker starts.
             (home / ".devtainer-env").write_text(
                 "export GH_TOKEN=stale-home-token\nexport GITHUB_TOKEN=stale-home-token\nexport GH_CONFIG_DIR=/wrong/config\n"
             )
             env = dict(os.environ, HOME=directory, GH_CONFIG_DIR=str(config),
-                       CODEX_HOME=str(home / ".codex"), DEVIL_MODE="",
+                       CODEX_HOME=str(home / ".codex"),
                        GH_TOKEN="stale-inherited-token", GITHUB_TOKEN="stale-inherited-token")
             result = subprocess.run(
                 ["bash", "-c", entrypoint, "entrypoint", "gh", "auth", "token",
