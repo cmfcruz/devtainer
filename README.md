@@ -188,14 +188,44 @@ The image installs GitHub CLI `2.103.3` from its pinned upstream release, with
 SHA-256 verification for both amd64 and arm64. Rebuild with `bash install.sh`
 to update the CLI; regenerating launchers alone does not update the image.
 
-Both `dev` and `devil` require a saved host GitHub CLI login for `github.com`.
-At each launch, host `gh config get user --host github.com` selects the active
-account, then `gh auth token --hostname github.com --user <account>` retrieves its
-credential from its keyring or saved config. Host `GH_CONFIG_DIR` and
-`XDG_CONFIG_HOME` overrides are respected by `gh`; `GH_TOKEN` and `GITHUB_TOKEN`
-are ignored during retrieval. A missing CLI, failed retrieval, or empty/malformed
-token stops the launcher before starting the container. Retrieval does not check
-whether GitHub has expired or revoked the credential.
+Both launchers use dedicated fine-grained personal access tokens, separate from
+your normal host `gh` login. Regenerate launchers with `bash install.sh --skip-build`,
+then run either host command:
+
+```bash
+dev setup-github
+# Equivalent: devil setup-github
+```
+
+Setup opens a GitHub token creation form with a 30-day expiration and **Contents**,
+**Actions**, and **Pull requests** set to **Read-only**. Select the resource owner
+and only the repositories you need; Metadata read access is included. The form is
+editable: grant no write permissions. GitHub enforces the grants you select;
+setup validates the token's format and account login, not its permission grants.
+See [GitHub's fine-grained token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+Paste the token at the hidden prompt. Host `gh` validates it using an isolated
+temporary config, without changing your normal login or taking credentials from
+`GH_TOKEN`/`GITHUB_TOKEN`. Setup requires host `gh` and network access; normal
+container launches require neither. If a browser cannot open, use the printed URL.
+Empty input cancels. Failed validation preserves any saved credential.
+
+The account name and token are saved together in
+`~/.config/devtainer/github/default.credential` (mode `600`, parent mode `700`).
+Setup replaces this file atomically after successful login validation. Both
+launchers share it. For separate repository owners, use named profiles:
+
+```bash
+dev setup-github office
+devil --github-token office gh repo view ORGANIZATION/REPO
+dev --github-token office
+```
+
+A fine-grained token covers one resource owner. Organizations may require approval;
+a successful login check does not mean an organization has approved repository
+access. Missing, unsafe, or malformed credentials stop the launcher; it never
+falls back to your full-access host login or token environment variables. Older
+`*.token` files are not used; rerun setup to save a new credential profile.
 
 The launcher creates a unique directory under `${TMPDIR:-/tmp}` with mode `700`
 and writes minimal `hosts.yml` and `config.yml` files with mode `600`.
@@ -203,7 +233,7 @@ and writes minimal `hosts.yml` and `config.yml` files with mode `600`.
 read-only config on startup. Only this directory is mounted,
 read-only, at `/home/<build username>/.config/gh` inside the container. The host
 config directory and OS keyring are not mounted. The temporary config includes
-only the active `github.com` token and selects HTTPS for `gh` Git operations;
+only the selected dedicated `github.com` token and selects HTTPS for `gh` Git operations;
 host aliases, other accounts, enterprise hosts, and SSH credentials are not copied.
 Existing repository remotes are not rewritten.
 
@@ -211,12 +241,13 @@ The token is never passed in container environment variables or command argument
 Shell tracing is disabled while retrieving and writing it. The entrypoint clears
 `GH_TOKEN` and `GITHUB_TOKEN` after loading the container home environment and sets
 `GH_CONFIG_DIR` to `$HOME/.config/gh`, preventing stale home settings from
-redirecting the initial login. The `setup-github` command and `--github-token`
-option remain removed; old devtainer token files are not read or mounted.
+redirecting the initial login. The persistent credential store itself is never
+mounted; launchers reject working directories that would expose that store
+through a directory bind mount.
 
 The temporary directory is deleted when the launcher exits, including Docker
 failure and handled HUP, INT, and TERM signals. Each launch has its own snapshot;
-account switches and token changes on the host take effect on the next launch.
+replacing a saved profile takes effect on the next launch.
 SIGKILL, host crashes, or power loss can leave a `devtainer-gh.*` directory under
 the host temporary root. Such leftovers can be removed after their containers stop.
 Use a local Docker daemon: the host temporary path must be available to the daemon.
@@ -225,7 +256,8 @@ container; otherwise the launcher stops before retrieving credentials to avoid
 exposing a second copy through `/workspace` or another mount. Set `TMPDIR`
 outside mounted directories when necessary.
 
-The credential retains the host login's GitHub permissions. The temporary file is
+The credential has the permissions selected when creating its PAT. With only
+read grants, GitHub rejects writes made with that credential. The temporary file is
 plaintext, readable by its host owner and by the container user. A read-only mount
 prevents modification, not reading or GitHub API writes. Keeping the path under
 `~/.config/gh` allows existing path policies to match it, but does not itself block
@@ -234,8 +266,10 @@ sharing, not a credential isolation boundary.
 
 Regenerate the launchers with `./install.sh --skip-build` if the image already has
 the updated entrypoint; otherwise rebuild with `./install.sh`. Start a new
-container and compare `gh auth status` on the host with `dev gh auth status` or
-`devil gh auth status`. Manage login and account changes on the host.
+container and check `dev gh auth status` or `devil gh auth status`.
+Run setup again to rotate a profile. Delete its `.credential` file to stop future
+launches from using it; revoke the token on GitHub to invalidate running copies.
+Your normal host login is independent of these profiles.
 
 ## Host Mounts
 
@@ -326,6 +360,12 @@ Still protected — never mounted into any container:
 - Private GPG key files. Signing uses the host GPG agent over its extra socket; `~/.gnupg/private-keys-v1.d` is not mounted, so the private key never leaves the host and cannot be extracted.
 - SSH keys, cloud credentials (`~/.aws`, `~/.config/gcloud`, and similar), and everything else in your host home outside the explicit mount list.
 - Any repository or file outside the current directory (`$PWD`).
+
+Both modes expose the selected dedicated GitHub credential to container code.
+GitHub enforces the permissions chosen for the PAT; a read-only mount does not
+reduce those permissions. The token and permitted private data can still be read
+or exfiltrated by a compromised process. Revoke the PAT on GitHub after suspected
+compromise.
 
 Exposed to code running in `dev` — treat as reachable by a compromised dependency or injected prompt:
 

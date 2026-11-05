@@ -46,6 +46,25 @@ class GitHubAuthTest(unittest.TestCase):
 
 
     @unittest.skipUnless(shutil.which("gh"), "GitHub CLI is required")
+    def test_isolated_setup_config_exposes_only_its_synthetic_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            token = "github_pat_FAKE_SETUP_CREDENTIAL"
+            (config / "hosts.yml").write_text(f'github.com:\n    oauth_token: "{token}"\n')
+            (config / "config.yml").write_text("version: 1\n")
+            env = dict(os.environ, GH_CONFIG_DIR=directory)
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_TOKEN", None)
+            before = {p.name: p.read_bytes() for p in config.iterdir()}
+            result = subprocess.run(
+                ["gh", "auth", "token", "--hostname", "github.com"],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), token)
+            self.assertEqual({p.name: p.read_bytes() for p in config.iterdir()}, before)
+
+    @unittest.skipUnless(shutil.which("gh"), "GitHub CLI is required")
     @unittest.skipIf(os.geteuid() == 0, "root bypasses file permission restrictions")
     def test_auth_status_accepts_config_without_write_permission(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -28,6 +28,11 @@ class LauncherDefaultsTest(unittest.TestCase):
             gh = fake_bin / "gh"
             gh.write_text("#!/bin/sh\nif [ \"$1\" = config ]; then echo test-user; else echo gho_FAKE_TEST_CREDENTIAL; fi\n")
             gh.chmod(0o755)
+            store = home / ".config/devtainer/github"
+            store.mkdir(parents=True, mode=0o700)
+            credential = store / "default.credential"
+            credential.write_text("test-user\ngithub_pat_FAKE_TEST_CREDENTIAL\n")
+            credential.chmod(0o600)
             env = dict(os.environ, HOME=directory,
                        PATH=f"{fake_bin}:{os.environ['PATH']}")
             for key in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME", "WAYLAND_DISPLAY"):

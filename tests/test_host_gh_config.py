@@ -10,7 +10,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-TOKEN = "gho_FAKE_TEST_CREDENTIAL"
+TOKEN = "github_pat_FAKE_TEST_CREDENTIAL"
 
 
 class HostGhConfigTest(unittest.TestCase):
@@ -26,16 +26,15 @@ class HostGhConfigTest(unittest.TestCase):
         gh = fake_bin / "gh"
         gh.write_text(
             '#!/usr/bin/env python3\n'
-            'import json, os, sys\n'
+            'import os, sys\n'
             'from pathlib import Path\n'
             'assert "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ\n'
-            'Path(os.environ["HOME"], "gh.json").write_text(json.dumps({k: os.environ.get(k) '
-            'for k in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME")}))\n'
-            'if sys.argv[1:] == ["config", "get", "user", "--host", "github.com"]:\n'
-            '    print(os.environ.get("TEST_USER", "test-user"))\n'
-            'else:\n'
-            '    assert sys.argv[1:] == ["auth", "token", "--hostname", "github.com", "--user", "test-user"]\n'
-            '    print(os.environ.get("TEST_TOKEN", "gho_FAKE_TEST_CREDENTIAL"))\n'
+            'assert sys.argv[1:] == ["api", "--hostname", "github.com", "user", "--jq", ".login"]\n'
+            'config = Path(os.environ["GH_CONFIG_DIR"])\n'
+            'assert (config / "config.yml").read_text() == "version: 1\\n"\n'
+            'assert "github_pat_" in (config / "hosts.yml").read_text()\n'
+            'Path(os.environ["HOME"], "gh.json").write_text("called")\n'
+            'print(os.environ.get("TEST_USER", "test-user"))\n'
             'sys.exit(int(os.environ.get("TEST_GH_EXIT", "0")))\n'
         )
         gh.chmod(0o755)
@@ -67,11 +66,18 @@ class HostGhConfigTest(unittest.TestCase):
         subprocess.run(["bash", "install.sh"], cwd=ROOT, env=self.env,
                        check=True, capture_output=True)
         self.log = self.home / "docker.json"
+        self.work = self.home / "project"
+        self.work.mkdir()
+        self.store = self.home / ".config/devtainer/github"
+        self.store.mkdir(parents=True, mode=0o700)
+        self.credential = self.store / "default.credential"
+        self.credential.write_text(f"test-user\n{TOKEN}\n")
+        self.credential.chmod(0o600)
 
     def launch(self, launcher, overrides=None):
         return subprocess.run(
             ["bash", "-x", str(self.home / "bin" / launcher), "gh", "auth", "status"],
-            cwd=self.home, env=dict(self.env, **(overrides or {})), capture_output=True, text=True,
+            cwd=self.work, env=dict(self.env, **(overrides or {})), capture_output=True, text=True,
         )
 
     def assert_clean(self):
@@ -99,31 +105,51 @@ class HostGhConfigTest(unittest.TestCase):
                     self.assertEqual(data["config"], f'github.com:\n    user: "test-user"\n    oauth_token: "{TOKEN}"\n    git_protocol: https\n    users:\n        "test-user":\n            oauth_token: "{TOKEN}"\n')
                     self.assertNotIn(str(host_config), " ".join(data["args"]))
                     self.assertNotIn(TOKEN, result.stdout + result.stderr + " ".join(data["args"]))
-                    gh_env = json.loads((self.home / "gh.json").read_text())
-                    for key, value in override.items():
-                        self.assertEqual(gh_env[key], value)
+                    self.assertFalse((self.home / "gh.json").exists())
                     self.assertEqual(sentinel.read_text(), "host config must remain untouched")
                     self.assert_clean()
 
     def test_unavailable_and_malformed_credentials_fail_closed(self):
         for launcher in ("dev", "devil"):
-            for overrides in ({"TEST_GH_EXIT": "1"}, {"TEST_TOKEN": ""},
-                              {"TEST_TOKEN": "bad\n    injected: yaml"}, {"TEST_USER": "bad: user"}):
-                with self.subTest(launcher=launcher, overrides=overrides):
-                    result = self.launch(launcher, overrides)
+            for content in (None, "", "test-user\nghp_CLASSIC\n",
+                            "test-user\ngithub_pat_BAD;yaml\n", "bad: user\n" + TOKEN + "\n"):
+                with self.subTest(launcher=launcher, content=content):
+                    self.credential.unlink(missing_ok=True)
+                    if content is not None:
+                        self.credential.write_text(content)
+                        self.credential.chmod(0o600)
+                    result = self.launch(launcher)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(self.log.exists())
+                    self.assertFalse((self.home / "gh.json").exists())
                     self.assertNotIn(TOKEN, result.stdout + result.stderr)
                     self.assert_clean()
 
+    def test_named_token_and_private_file_requirement(self):
+        named = self.store / "office.credential"
+        named.write_text(f"test-user\n{TOKEN}\n")
+        named.chmod(0o600)
+        for launcher in ("dev", "devil"):
+            result = subprocess.run(
+                [str(self.home / "bin" / launcher), "--github-token", "office", "gh", "auth", "status"],
+                cwd=self.work, env=self.env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_clean()
+        self.log.unlink()
+        self.credential.chmod(0o644)
+        result = self.launch("dev")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.log.exists())
+
     def test_credentials_cannot_be_exposed_through_workspace(self):
         for launcher in ("dev", "devil"):
-            result = self.launch(launcher, {"TMPDIR": str(self.home)})
+            result = self.launch(launcher, {"TMPDIR": str(self.work)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("exposed through a host directory mount", result.stderr)
             self.assertFalse(self.log.exists())
             self.assertFalse((self.home / "gh.json").exists())
-            self.assertEqual(list(self.home.glob("devtainer-gh.*")), [])
+            self.assertEqual(list(self.work.glob("devtainer-gh.*")), [])
 
     def test_credentials_cannot_be_exposed_through_other_host_mounts(self):
         for relative in (".claude", ".cache/devtainer", ".config/nvim"):
@@ -146,7 +172,7 @@ class HostGhConfigTest(unittest.TestCase):
             self.log.unlink(missing_ok=True)
             with subprocess.Popen(
                 [str(self.home / "bin" / launcher), "gh", "auth", "status"],
-                cwd=self.home, env=dict(self.env, TEST_WAIT="1"),
+                cwd=self.work, env=dict(self.env, TEST_WAIT="1"),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
             ) as process:
                 try:

@@ -67,6 +67,8 @@ touch "${HOME}/.gitmessage"
 touch "${HOME}/.tmux.conf"
 touch "${HOME}/.claude.json"
 
+GITHUB_LAUNCHER_SCRIPT=$(cat scripts/github-launcher.sh)
+
 DEFAULT_COMMAND_SCRIPT=$(
   cat << 'SCRIPT'
 if [[ $# -eq 0 ]]; then
@@ -81,12 +83,11 @@ SCRIPT
 
 DEVIL_COMMAND_SCRIPT="${DEFAULT_COMMAND_SCRIPT}"
 
-# Snapshot only the active github.com credential; never expose the host keyring.
+# Snapshot only the selected dedicated token; never fall back to the host login.
 GH_CONFIG_ARGS_SCRIPT=$(
   cat << 'SCRIPT'
 # Disable tracing before retrieving or expanding any credential.
-gh_trace=false
-[[ $- != *x* ]] || gh_trace=true
+gh_trace="$github_trace"
 set +x
 gh_config_tmp="$(mktemp -d "${TMPDIR:-/tmp}/devtainer-gh.XXXXXXXXXX")"
 cleanup_gh_config() {
@@ -108,28 +109,40 @@ for gh_mount_arg in "${docker_args[@]}"; do
     exit 1
   fi
 done
-# Ignore token overrides on the host too: use gh's saved login/keyring.
-if ! gh_user="$(unset GH_TOKEN GITHUB_TOKEN; gh config get user --host github.com 2>/dev/null)"; then
-  printf 'devtainer: cannot find the host GitHub account. Install gh and run gh auth login --hostname github.com on the host.\n' >&2
+if [[ ! -f "$github_file" || -L "$github_file" || ! -O "$github_file" || -L "$github_dir" || ! -O "$github_dir" ]]; then
+  printf 'devtainer: dedicated token "%s" is missing or unsafe. Run: %s setup-github %s\n' "$github_name" "${0##*/}" "$github_name" >&2
   exit 1
 fi
-if [[ ! "$gh_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
-  printf 'devtainer: host gh returned an empty or malformed account name.\n' >&2
+if [[ "$(stat -c %a "$github_file")" != 600 || "$(stat -c %a "$github_dir")" != 700 ]]; then
+  printf 'devtainer: dedicated token file must have mode 600. Run setup-github again.\n' >&2
   exit 1
 fi
-if ! gh_token="$(unset GH_TOKEN GITHUB_TOKEN; gh auth token --hostname github.com --user "$gh_user" 2>/dev/null)"; then
-  printf 'devtainer: cannot retrieve the host GitHub credential. Install gh and run gh auth login --hostname github.com on the host.\n' >&2
+# The persistent store must not be reachable through another container mount.
+github_store="$(cd "$github_dir" && pwd -P)/${github_name}.credential"
+for gh_mount_arg in "${docker_args[@]}"; do
+  gh_mount_source="${gh_mount_arg%%:*}"
+  [[ "$gh_mount_arg" == /*:* && -d "$gh_mount_source" ]] || continue
+  gh_mount_source="$(cd "$gh_mount_source" && pwd -P)"
+  if [[ "$gh_mount_source" == / || "$github_store" == "$gh_mount_source/"* ]]; then
+    printf 'devtainer: the dedicated credential store would be exposed through a host directory mount. Launch from a project directory outside that store.\n' >&2
+    exit 1
+  fi
+done
+mapfile -t gh_credential < "$github_file"
+if [[ "${#gh_credential[@]}" != 2 ]]; then
+  printf 'devtainer: malformed dedicated credential. Run setup-github again.\n' >&2
   exit 1
 fi
-# A restricted token alphabet prevents YAML injection; never echo bad input.
-if [[ ! "$gh_token" =~ ^[a-zA-Z0-9_]+$ ]]; then
-  printf 'devtainer: host gh returned an empty or malformed credential.\n' >&2
+gh_user="${gh_credential[0]}"
+gh_token="${gh_credential[1]}"
+if [[ ! "$gh_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ || ! "$gh_token" =~ ^github_pat_[a-zA-Z0-9_]+$ ]]; then
+  printf 'devtainer: malformed dedicated credential. Run setup-github again.\n' >&2
   exit 1
 fi
 (umask 077; printf 'github.com:\n    user: "%s"\n    oauth_token: "%s"\n    git_protocol: https\n    users:\n        "%s":\n            oauth_token: "%s"\n' "$gh_user" "$gh_token" "$gh_user" "$gh_token" > "$gh_config_tmp/hosts.yml")
 # gh auth status migrates configs without a schema marker, even with users set.
 (umask 077; printf 'version: 1\n' > "$gh_config_tmp/config.yml")
-unset gh_token gh_user
+unset gh_token gh_user gh_credential
 docker_args+=(
   --mount "type=bind,source=$gh_config_tmp,target=$container_gh_config,readonly"
   -e "GH_CONFIG_DIR=$container_gh_config"
@@ -191,6 +204,8 @@ cat > "${DEV_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
+${GITHUB_LAUNCHER_SCRIPT}
+
 ${DEFAULT_COMMAND_SCRIPT}
 
 docker_args=(
@@ -235,6 +250,8 @@ echo "Installing ${DEVIL_BIN}, which starts an interactive dev container with Do
 cat > "${DEVIL_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
+
+${GITHUB_LAUNCHER_SCRIPT}
 
 ${DEVIL_COMMAND_SCRIPT}
 
