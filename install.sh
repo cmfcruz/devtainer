@@ -70,7 +70,11 @@ touch "${HOME}/.claude.json"
 DEFAULT_COMMAND_SCRIPT=$(
   cat << 'SCRIPT'
 if [[ $# -eq 0 ]]; then
-  set -- nvim .
+  session_name="$(basename "$PWD")"
+  # tmux reserves periods and colons in session targets.
+  session_name="${session_name//[.:]/_}"
+  [[ "$session_name" != / ]] || session_name=workspace
+  set -- tmux new-session -A -s "$session_name" -c /workspace
 fi
 SCRIPT
 )
@@ -138,7 +142,7 @@ fi
 SCRIPT
 )
 
-echo "Installing ${DEV_BIN}, which starts an interactive Claude Code-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.claude and ${HOME}/.claude.json mounted into the same home paths inside the container, Git and tmux config plus Neovim config and data mounted read-only, a dedicated host cache root mounted as \$HOME/.cache, and the host GPG agent extra socket and public keyring mounted for code signing when available. Run \`dev\` to open \`nvim .\` directly, or append a command like \`dev claude\` to override it."
+echo "Installing ${DEV_BIN}, which starts an interactive Claude Code-capable dev container with the current directory mounted at ${WORK_DIR}, the hostname set to the current directory name, ${HOME}/.claude and ${HOME}/.claude.json mounted into the same home paths inside the container, Git and tmux config plus Neovim config and data mounted read-only, a dedicated host cache root mounted as \$HOME/.cache, and the host GPG agent extra socket and public keyring mounted for code signing when available. Run \`dev\` to open a directory-named tmux session, or append a command like \`dev claude\` to override it."
 cat > "${DEV_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -181,7 +185,7 @@ chmod +x "${DEV_BIN}"
 
 echo "Installed dev at ${DEV_BIN}"
 
-echo "Installing ${DEVIL_BIN}, which starts an interactive dev container with Docker volume devil-${USERNAME} mounted as /home for persistent, self-contained container home state. Run \`devil\` to open \`nvim .\` directly, or append a command like \`devil codex\` to override it."
+echo "Installing ${DEVIL_BIN}, which starts an interactive dev container with Docker volume devil-${USERNAME} mounted as /home for persistent, self-contained container home state. Run \`devil\` to open a directory-named tmux session, or append a command like \`devil codex\` to override it."
 cat > "${DEVIL_BIN}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail

@@ -83,7 +83,7 @@ dev
 
 `dev` is the Claude Code-capable mode. It mounts `~/.claude` and `~/.claude.json` read-write, mounts dedicated host dependency caches, and mounts the host GPG agent extra socket and public keyring for code signing when available.
 
-With no arguments, every launcher opens `nvim .` directly (no tmux). tmux is still installed if you want it; run `dev tmux` or split panes yourself.
+With no arguments, both `dev` and `devil` open a tmux session named after the host directory you launched from, starting a shell in `/workspace`. Periods and colons in directory names become underscores because tmux reserves those characters. For example, launching from `~/code/my.app` creates session `my_app`. The session attaches if it already exists in that container. Sessions last for the lifetime of the container; the `devil` home volume persists files, not running sessions. Pass a command to override the default, such as `dev nvim .` or `devil bash`.
 
 Use `devil` for a persistent container home backed by a Docker named volume:
 
