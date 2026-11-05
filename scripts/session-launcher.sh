@@ -7,7 +7,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --session)
       if [[ $# -lt 2 ]]; then
-        printf 'Usage: dev [--session NAME] [setup-github | reset-home | command ...]\n' >&2
+        printf 'Usage: dev [--session NAME] [reset-home | command ...]\n' >&2
         exit 1
       fi
       dev_session="$2"
@@ -18,9 +18,8 @@ while [[ $# -gt 0 ]]; do
       break
       ;;
     -h | --help)
-      printf '%s\n' 'Usage: dev [--session NAME] [setup-github | reset-home | command ...]' \
+      printf '%s\n' 'Usage: dev [--session NAME] [reset-home | command ...]' \
         'Default session: dev. No command opens a directory-named tmux session.' \
-        'setup-github [ACCOUNT] binds this session to a saved host gh account.' \
         'reset-home deletes the selected session home after confirmation.'
       exit 0
       ;;
@@ -94,7 +93,7 @@ if [[ "${1:-}" == reset-home ]]; then
     exit 1
   fi
   printf 'Reset session "%s": delete volume %s, including logins, settings, caches, and home-installed tools.\n' "$dev_session" "$volume_name"
-  printf 'The workspace and the session\x27s GitHub account binding are kept.\n'
+  printf 'The workspace and host GitHub login are kept.\n'
   if [[ ! -t 0 ]]; then
     printf 'reset-home requires an interactive terminal for confirmation.\n' >&2
     exit 1
@@ -113,10 +112,12 @@ if [[ "${1:-}" == reset-home ]]; then
   exit 0
 fi
 
-if [[ "${1:-}" != setup-github ]]; then
-  prepare_session_lock
-  if ! flock --nonblock --shared 9; then
-    printf 'Session %s is being reset. Try again after the reset finishes.\n' "$dev_session" >&2
-    exit 1
-  fi
+if [[ "${1:-}" == setup-github ]]; then
+  printf 'setup-github is no longer needed. Each launch uses the active host gh account; run dev directly.\n' >&2
+  exit 1
+fi
+prepare_session_lock
+if ! flock --nonblock --shared 9; then
+  printf 'Session %s is being reset. Try again after the reset finishes.\n' "$dev_session" >&2
+  exit 1
 fi

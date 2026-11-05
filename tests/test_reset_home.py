@@ -50,31 +50,29 @@ class ResetHomeTest(unittest.TestCase):
                 process.wait()
             os.close(master)
 
-    def test_reset_deletes_only_selected_home_and_keeps_profiles(self):
+    def test_reset_deletes_only_selected_home_and_keeps_host_login(self):
         f = self.fixture
         self.assertEqual(f.launch("dev").returncode, 0)
         self.assertEqual(f.launch("personal").returncode, 0)
         state = json.loads(f.state_file.read_text())
         state["volumes"]["devil-old-user"] = {"labels": {}, "marker": "legacy personal data"}
         f.state_file.write_text(json.dumps(state))
-        personal_credential = (f.profile_dir("personal") / "github.account").read_bytes()
+        host_login = f.host_accounts.read_bytes()
         code, output = self.interactive_reset("personal", "personal")
         self.assertEqual(code, 0, output)
         remaining = json.loads(f.state_file.read_text())["volumes"]
         self.assertEqual(set(remaining), {f.volume("dev"), "devil-old-user"})
-        self.assertEqual((f.profile_dir("personal") / "github.account").read_bytes(), personal_credential)
+        self.assertEqual(f.host_accounts.read_bytes(), host_login)
         self.assertEqual(f.launch("personal").returncode, 0)
         recreated = json.loads(f.state_file.read_text())["volumes"]
         self.assertIn(f.volume("personal"), recreated)
 
     def test_missing_volume_and_noninteractive_reset(self):
         f = self.fixture
-        f.credential.unlink()
         result = self.run_reset()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no home volume", result.stdout)
         self.assertFalse(f.state_file.exists())
-        f.seed_profile("dev", "office-user")
         self.assertEqual(f.launch().returncode, 0)
         before = f.state_file.read_bytes()
         result = self.run_reset()

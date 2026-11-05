@@ -106,9 +106,8 @@ class HostGhConfigTest(unittest.TestCase):
         self.log = self.home / "docker.json"
         self.calls = self.home / "docker-calls.jsonl"
         self.state_file = self.home / "docker-state.json"
-        self.store = self.profile_dir("dev")
-        self.credential = self.seed_profile("dev", "office-user")
-        self.seed_profile("personal", "personal-user")
+        self.host_config = self.home / ".config/gh"
+        self.host_config.mkdir(parents=True)
         self.gh_calls = self.home / "gh-calls.jsonl"
         self.host_accounts = self.home / "host-accounts.json"
         self.host_accounts.write_text(json.dumps({"active": "office-user", "tokens": {
@@ -117,14 +116,6 @@ class HostGhConfigTest(unittest.TestCase):
 
     def profile_dir(self, session):
         return self.home / ".config/devtainer/sessions" / session
-
-    def seed_profile(self, session, account):
-        store = self.profile_dir(session)
-        store.mkdir(parents=True, mode=0o700, exist_ok=True)
-        path = store / "github.account"
-        path.write_text(account + "\n")
-        path.chmod(0o600)
-        return path
 
     def volume(self, session):
         return f"devtainer-{os.getuid()}-{session}-home"
@@ -138,8 +129,8 @@ class HostGhConfigTest(unittest.TestCase):
     def assert_clean(self):
         self.assertEqual(list(self.tmp_root.glob("devtainer-gh.*")), [])
 
-    def test_sessions_have_distinct_homes_and_credentials(self):
-        for session, token in (("dev", TOKEN), ("personal", PERSONAL_TOKEN)):
+    def test_sessions_have_distinct_homes_and_use_active_host_account(self):
+        for session, token in (("dev", TOKEN), ("personal", TOKEN)):
             with self.subTest(session=session):
                 result = self.launch(session)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -155,49 +146,42 @@ class HostGhConfigTest(unittest.TestCase):
                 self.assertEqual(data["schema_mode"], 0o600)
                 self.assertEqual(data["schema"], "version: 1\n")
                 self.assertIn(token, data["config"])
-                other = PERSONAL_TOKEN if session == "dev" else TOKEN
-                self.assertNotIn(other, data["config"])
+                self.assertNotIn(PERSONAL_TOKEN, data["config"])
                 self.assertNotIn(token, result.stdout + result.stderr + " ".join(data["args"]))
-                account = "office-user" if session == "dev" else "personal-user"
+                account = "office-user"
                 calls = [json.loads(line)["args"] for line in self.gh_calls.read_text().splitlines()]
                 self.assertEqual(calls[-1], ["auth", "token", "--hostname", "github.com", "--user", account])
-                self.assertEqual((self.profile_dir(session) / "github.account").read_text(), account + "\n")
+                self.assertFalse((self.profile_dir(session) / "github.account").exists())
+                self.assertEqual(calls[-2], ["config", "get", "user", "--host", "github.com"])
                 mounts = [data['args'][i+1] for i, a in enumerate(data['args']) if a == '-v']
                 self.assertEqual(mounts, [f"{self.volume(session)}:/home", f"{self.work}:/workspace"])
                 self.assert_clean()
         self.assertFalse((self.home / "bin/devil").exists())
         self.assertFalse((self.home / ".claude").exists())
 
-    def test_missing_profile_never_uses_other_session_or_host_login(self):
-        legacy = self.home / ".config/devtainer/github"
-        legacy.mkdir(mode=0o700)
-        (legacy / "default.credential").write_text(f"test-user\n{TOKEN}\n")
-        (legacy / "default.credential").chmod(0o600)
-        (legacy / "default.token").write_text(TOKEN + "\n")
-        for session in ("dev", "personal"):
-            path = self.profile_dir(session) / "github.account"
-            original = path.read_bytes()
-            path.unlink()
-            result = self.launch(session)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(f"--session {session} setup-github", result.stderr)
-            self.assertFalse(self.log.exists())
-            self.assertFalse(self.gh_calls.exists())
-            path.write_bytes(original)
-            path.chmod(0o600)
-            self.assert_clean()
+    def test_legacy_bindings_and_credentials_are_ignored(self):
+        legacy = self.profile_dir("personal")
+        legacy.mkdir(parents=True, mode=0o700)
+        (legacy / "github.account").write_text("personal-user\n")
+        (legacy / "github.credential").write_text(f"personal-user\n{PERSONAL_TOKEN}\n")
+        result = self.launch("personal")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TOKEN, json.loads(self.log.read_text())["config"])
+        self.assertNotIn(PERSONAL_TOKEN, json.loads(self.log.read_text())["config"])
+        self.assertEqual((legacy / "github.account").read_text(), "personal-user\n")
+        self.assert_clean()
 
-    def test_malformed_binding_and_unsafe_permissions_fail_closed(self):
-        for content in ("", "office-user\npersonal-user\n", "bad: user\n", TOKEN + "\n"):
-            self.credential.write_text(content)
+    def test_invalid_active_account_fails_before_token_lookup(self):
+        state = json.loads(self.host_accounts.read_text())
+        for account in ("", "bad: user", "office-user\npersonal-user"):
+            state["active"] = account
+            self.host_accounts.write_text(json.dumps(state))
             result = self.launch()
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(self.log.exists())
-            self.assertFalse(self.gh_calls.exists())
             self.assert_clean()
-        self.seed_profile("dev", "office-user").chmod(0o644)
-        self.assertNotEqual(self.launch().returncode, 0)
-        self.assertFalse(self.log.exists())
+        calls = [json.loads(line)["args"] for line in self.gh_calls.read_text().splitlines()]
+        self.assertTrue(all(c[0] == "config" for c in calls))
 
     def test_failed_token_retrieval_never_falls_back(self):
         for overrides in ({"TEST_GH_EXIT": "1"}, {"TEST_TOKEN": ""},
@@ -209,24 +193,26 @@ class HostGhConfigTest(unittest.TestCase):
             self.assert_clean()
         state = json.loads(self.host_accounts.read_text())
         del state["tokens"]["office-user"]
-        state["active"] = "personal-user"
         self.host_accounts.write_text(json.dumps(state))
         self.assertNotEqual(self.launch().returncode, 0)
         self.assertFalse(self.log.exists())
 
-    def test_host_switch_and_rotation_preserve_session_account(self):
+    def test_each_launch_follows_host_switches_and_token_rotation(self):
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertIn(TOKEN, json.loads(self.log.read_text())["config"])
         state = json.loads(self.host_accounts.read_text())
         state["active"] = "personal-user"
-        state["tokens"]["office-user"] = TOKEN + "_ROTATED"
+        state["tokens"]["personal-user"] = PERSONAL_TOKEN + "_ROTATED"
         self.host_accounts.write_text(json.dumps(state))
         result = self.launch(overrides={"GH_CONFIG_DIR": str(self.home / "custom gh config")})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(TOKEN + "_ROTATED", json.loads(self.log.read_text())["config"])
+        self.assertIn(PERSONAL_TOKEN + "_ROTATED", json.loads(self.log.read_text())["config"])
+        self.assertNotIn(TOKEN, json.loads(self.log.read_text())["config"])
         calls = [json.loads(line) for line in self.gh_calls.read_text().splitlines()]
-        self.assertEqual(calls[-1]["args"][-1], "office-user")
+        self.assertEqual(calls[-1]["args"][-1], "personal-user")
         self.assertEqual(calls[-1]["config"], str(self.home / "custom gh config"))
-        self.assertEqual(self.credential.read_text(), "office-user\n")
-        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        self.assertNotIn(PERSONAL_TOKEN, result.stdout + result.stderr)
+        self.assertFalse((self.profile_dir("dev") / "github.account").exists())
         self.assert_clean()
 
     def test_workspace_cannot_expose_credentials(self):

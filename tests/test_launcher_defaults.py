@@ -48,6 +48,15 @@ class LauncherDefaultsTest(unittest.TestCase):
         self.assertIn("--session", result.stdout)
         self.assertFalse(f.calls.exists())
 
+    def test_setup_github_is_no_longer_required_or_supported(self):
+        f = self.fixture
+        result = subprocess.run([str(f.home / "bin/dev"), "setup-github"], cwd=f.work,
+                                env=f.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no longer needed", result.stderr)
+        self.assertFalse(f.calls.exists())
+        self.assertFalse(f.gh_calls.exists())
+
     def test_install_retires_only_generated_legacy_launcher(self):
         f = self.fixture
         legacy = f.home / "bin/devil"

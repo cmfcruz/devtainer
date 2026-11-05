@@ -39,7 +39,7 @@ That lets `dev claude` run in auto mode, which uses a classifier to skip prompts
 ## Install
 
 The host needs Linux, Bash 4+, Docker, and `flock` (util-linux). Host `gh` is also
-needed for GitHub setup and container launches. The image uses the builder's username, UID, and GID.
+needed for retrieving GitHub credentials at container launch. The image uses the builder's username, UID, and GID.
 
 ```bash
 bash install.sh
@@ -82,7 +82,6 @@ Session names contain 1-48 letters, digits, underscores, or hyphens, starting wi
 a letter or digit. Session options precede subcommands and container commands:
 
 ```bash
-dev --session personal setup-github
 dev --session personal reset-home
 dev --session personal git status
 ```
@@ -101,39 +100,39 @@ available directly in every session.
 
 ## GitHub Access Through Host gh
 
-Dev retrieves GitHub credentials through the host's saved `gh` login and keyring.
-No personal access token creation or token pasting is needed. Sign in to the
-accounts you need using `gh auth login --hostname github.com` on the host.
-
-Bind each session to a host account once:
+Every container launch uses whichever `github.com` account is currently active
+in host `gh`. No devtainer GitHub setup, username selection, PAT creation, or
+account binding is required:
 
 ```bash
-dev setup-github                         # bind dev to the host's active account
-dev --session personal setup-github YOUR_PERSONAL_USERNAME
+gh auth status
+dev
 ```
 
-An explicit username selects an account already saved in host `gh`, without
-switching the host's active account. Omitting it selects the currently active
-host account. Setup checks that `gh` can retrieve that account's token, then
-atomically saves only its username at:
+To use a different account, switch it on the host before starting the container:
 
-```text
-~/.config/devtainer/sessions/<session>/github.account
+```bash
+gh auth switch --hostname github.com --user YOUR_PERSONAL_USERNAME
+dev --session personal
 ```
 
-The session directory is mode `700` and the account file mode `600`. Setup runs
-without Docker or a terminal prompt and leaves an existing binding unchanged if
-retrieval fails. It does not create a second permanent token store or modify the
-host login. Old PAT `*.credential` and `*.token` files are left untouched and are
-not read; rerun setup to save the account binding.
+If needed, first sign in on the host with `gh auth login --hostname github.com`.
+Session names select independent home volumes; every session uses the active
+host GitHub account at launch. Changing that account affects new launches,
+including new containers in an existing session. Running containers keep their
+credential snapshots until exit or credential revocation.
 
-Each launch uses `gh auth token --hostname github.com --user <bound-account>`.
-Switching the host's active account does not change an existing session's binding.
-A missing binding or unavailable credential fails launch; dev never substitutes
-another session or active account. Host `GH_CONFIG_DIR` and `XDG_CONFIG_HOME`
-are respected; `GH_TOKEN`, `GITHUB_TOKEN`, and `GH_DEBUG` overrides are removed
-from the host retrieval subprocess. Local retrieval does not validate expiration
-or repository access with GitHub. See [gh auth token](https://cli.github.com/manual/gh_auth_token).
+At launch, dev reads the active username using `gh config get user --host github.com`,
+then retrieves its token using `gh auth token --hostname github.com --user <account>`.
+The explicit username keeps the snapshot consistent if the host switches during
+those two calls. An unavailable login or credential stops launch without choosing
+another saved account. Host `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` are respected;
+`GH_TOKEN`, `GITHUB_TOKEN`, and `GH_DEBUG` overrides are removed during retrieval.
+See [gh auth token](https://cli.github.com/manual/gh_auth_token).
+
+`setup-github` has been removed. Old session `github.account` bindings and saved
+PAT files are ignored and left untouched. No account name or token is saved
+permanently by this flow.
 
 **The container receives the host credential's full permissions.** A read-only
 mount does not make GitHub access read-only. Code in the container can read and
@@ -143,8 +142,8 @@ that token. The host account's organization and SSO policies still apply.
 The token is copied into a temporary directory (mode `700`), containing
 `hosts.yml` and `config.yml` (mode `600`). Schema version `1` prevents config
 migration on the read-only mount. The directory is mounted at the container
-user's `~/.config/gh`, and `GH_CONFIG_DIR` points there. The host gh configuration,
-keyring, and session account-binding files are not mounted.
+user's `~/.config/gh`, and `GH_CONFIG_DIR` points there. The host gh configuration
+and keyring are not mounted.
 
 Tokens are not passed through Docker arguments or token environment variables.
 Shell tracing is disabled during retrieval and writing. The entrypoint clears
@@ -155,12 +154,11 @@ Temporary snapshots are removed after exit, Docker failure, and handled HUP, INT
 and TERM signals. SIGKILL or a host crash can leave plaintext snapshots under
 `${TMPDIR:-/tmp}`. Remove leftovers after their containers stop. The temporary root
 must be available to a local Docker daemon and outside the project mount. A
-workspace exposing the host gh config or session account configuration is rejected.
+workspace exposing the host gh config is rejected.
 
-Host credential changes take effect on the next launch. Rebind an account by
-running setup again. Removing the account from host `gh` prevents new retrieval;
-revoke the credential on GitHub to invalidate existing snapshots. Resetting a
-home keeps the session's account binding.
+Host credential changes take effect on the next launch. Revoke the credential
+on GitHub to invalidate existing snapshots. Resetting a home keeps the host
+GitHub login unchanged.
 
 GitHub CLI `2.103.3` is installed from the pinned upstream release with SHA-256
 verification for amd64 and arm64. Check access with:
@@ -180,7 +178,7 @@ dev --session personal reset-home
 The command displays the exact volume and requires typing the selected session
 name in an interactive terminal. It deletes that volume's logins, shell state,
 settings, caches, and home-installed tools. The next launch initializes a fresh
-home from the image. The host account binding and mounted project files are kept.
+home from the image. The host GitHub login and mounted project files are kept.
 A missing home volume is already reset and requires no confirmation.
 
 Reset refuses homes used by another launcher or attached to any Docker container,

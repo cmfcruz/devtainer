@@ -9,25 +9,25 @@ Intended behavior:
 
 - The builder's username, UID, GID, and home are used inside the image.
 - dev defaults to session dev; --session personal selects a separate persistent
-  home volume and host GitHub account binding. Subcommands always follow the session.
+  home volume; GitHub credentials always follow the active host gh account. Subcommands always follow the session.
 - No previous volumes or profiles are migrated. Host Claude/Git/Neovim state,
   caches, and GPG sockets are not mounted. Wayland is still shared when available.
 - reset-home checks volume labels and attachments, takes an exclusive per-session
   lock, and requires typing the session name. It removes only that home volume.
-  Normal launches hold shared locks; host account bindings and workspaces are kept.
-- Host-only setup-github [ACCOUNT] binds the session to an existing host gh
-  account, using the active account if omitted. It atomically stores only the
-  username (600/700), never a persistent token copy. No PAT setup is required.
-- Each launch retrieves gh auth token --hostname github.com --user <bound-account>
-  through the host keyring/config. Switching the active host account must not
-  switch an already bound session. Failure never falls back to another account.
+  Normal launches hold shared locks; the host GitHub login and workspaces are kept.
+- No setup-github command or saved session-to-account binding is required.
+  Old account bindings and PAT files are ignored and left untouched.
+- Every launch reads the current host gh username and retrieves that account's
+  token through the host keyring/config. A host account switch affects subsequent
+  launches in all sessions. Retrieval failure never selects another saved account.
+- No account name or token is persistently stored by this flow.
 - The token retains all host permissions, including writes. This is intentional.
 - GH_TOKEN/GITHUB_TOKEN/GH_DEBUG are removed during host retrieval, while host
   GH_CONFIG_DIR/XDG_CONFIG_HOME selection is respected.
 - They create a unique temporary directory (700) and hosts.yml/config.yml (600),
   mount it read-only at the container user's ~/.config/gh, and set GH_CONFIG_DIR.
 - No host gh config or OS keyring is mounted. No credential is passed through
-  Docker arguments or token environment variables. The host account-binding configuration
+  Docker arguments or token environment variables. The host gh configuration
   itself is not mounted.
 - The entrypoint clears token overrides and restores the expected GH_CONFIG_DIR
   after loading the persistent home environment.
