@@ -189,11 +189,22 @@ exists, so `gh` can reuse your host login and settings. Host `GH_CONFIG_DIR`
 and `XDG_CONFIG_HOME` overrides are respected. Run `./install.sh`
 on the host to regenerate both launchers, then start a new container.
 
+GitHub authentication uses the mounted host config. The launchers do not forward
+`GH_TOKEN` or `GITHUB_TOKEN`, and the entrypoint clears both variables after
+loading the container home environment so stale tokens cannot override that login.
+The `setup-github` command and `--github-token` option have been removed; saved
+devtainer token files are no longer read or mounted.
+
 The mounted login has the same GitHub permissions as on the host. Read-only
 mounting prevents config changes; it does not restrict GitHub API access.
 If your host login stores its token in an OS keyring, the config mount alone
 cannot provide that token inside the container. Login and account changes
 should be made on the host.
+
+After updating, rebuild with `./install.sh` and start a new container. Check
+`gh auth status` on the host and `dev gh auth status` (or `devil gh auth status`)
+inside the container. A 401 can mean a stale token overrode the mounted login,
+an expired host credential, or an older installed launcher without the mount.
 
 ## Host Mounts
 
@@ -222,6 +233,9 @@ $(gpgconf --list-dirs agent-extra-socket) -> ~/.gnupg/S.gpg-agent, when availabl
 $PWD                           -> /workspace
 devil-<host username>           -> /home, as a Docker named volume
 ```
+
+Both launchers also mount the host GitHub CLI config directory, when present,
+at `~/.config/gh:ro` and set `GH_CONFIG_DIR` to that container path.
 
 Pre-commit normally stores hook environments in `~/.cache/pre-commit`, or in `PRE_COMMIT_HOME` when that variable is set. `dev` sets `PRE_COMMIT_HOME=~/.cache/pre-commit` inside the container and backs it with the dedicated host directory `~/.cache/devtainer/pre-commit`, so hook environments persist across throwaway container runs.
 

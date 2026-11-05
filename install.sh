@@ -81,13 +81,11 @@ SCRIPT
 
 DEVIL_COMMAND_SCRIPT="${DEFAULT_COMMAND_SCRIPT}"
 
-# Prefer the host gh login unless a named devtainer token was requested.
+# Reuse the host gh login without forwarding token environment variables.
 GH_CONFIG_ARGS_SCRIPT=$(
   cat << 'SCRIPT'
 host_gh_config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
-if [[ "${github_explicit:-false}" != true && -d "$host_gh_config" ]]; then
-  # Clear the implicit default token so it cannot shadow the host login.
-  github_args=()
+if [[ -d "$host_gh_config" ]]; then
   docker_args+=(
     -v "$host_gh_config:$HOME/.config/gh:ro"
     -e "GH_CONFIG_DIR=$HOME/.config/gh"
