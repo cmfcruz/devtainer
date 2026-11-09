@@ -8,6 +8,9 @@ if [[ $# -eq 0 ]]; then
   set -- tmux new-session -A -s "$tmux_session" -c /workspace
 fi
 
+# Restore the shared host Git settings as files before Docker binds them.
+touch "$HOME/.gitconfig" "$HOME/.gitmessage"
+
 # Used by the subsequent mount and startup fragments.
 # shellcheck disable=SC2034
 docker_args=(
@@ -28,6 +31,8 @@ docker_args=(
   -e "DEVTAINER_AGENT=${DEVTAINER_AGENT:-claude}"
   -v "$volume_name:/home"
   -v "$PWD:/workspace"
+  -v "$HOME/.gitconfig:$container_home/.gitconfig:ro"
+  -v "$HOME/.gitmessage:$container_home/.gitmessage:ro"
 )
 # shellcheck disable=SC2034
 container_gh_config="$container_home/.config/gh"

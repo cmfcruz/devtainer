@@ -72,9 +72,12 @@ dev       -> devtainer-<builder UID>-dev-home
 personal  -> devtainer-<builder UID>-personal-home
 ```
 
-Claude/Codex logins, configuration, shell settings, Git identity, Neovim data,
+Claude/Codex logins, configuration, shell settings, Neovim data,
 caches, and tools installed under home persist independently in each volume.
-Configure them inside the selected session. Host Claude state, Git and Neovim
+Configure them inside the selected session. The host `~/.gitconfig` and
+`~/.gitmessage` are mounted read-only at the same paths under the container home,
+so all sessions share the host Git configuration and commit template. Missing
+files are created on the host before launch. Host Claude state, Neovim
 configuration, dependency caches, and the host GPG agent are not mounted.
 The container home is `/home/<build username>`, regardless of the host home path.
 
@@ -204,7 +207,8 @@ The image uses UTF-8 (`C.UTF-8`) and includes a Neovim UTF-8 plugin. The bundled
 buoy.nvim plugin lives in the system runtime, outside session homes, and connects
 agents to live editor context without sharing the host's Neovim state.
 
-Git identity and signing credentials are configured within each session. No host
+Git identity comes from the mounted host configuration. Signing credentials
+are configured within each session. No host
 GPG socket or keyring is automatically shared. Private keys created in a session
 are part of that session's home state and are deleted by `reset-home`.
 
@@ -237,7 +241,7 @@ workspace. The host Wayland socket is shared when available. A malicious process
 can persist inside its session home until reset.
 
 The launcher does not share host Claude configuration, host home caches, host
-Git/Neovim settings, the host GPG agent, SSH keys, cloud credentials, or the Docker
+Neovim settings, the host GPG agent, SSH keys, cloud credentials, or the Docker
 socket. However, anything inside the directory selected as the workspace is
 reachable. Do not use a broad workspace containing sensitive host files. Project
 scripts and Git hooks changed inside a container can execute later on the host.

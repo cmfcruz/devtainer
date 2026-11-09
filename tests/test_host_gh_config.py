@@ -154,7 +154,12 @@ class HostGhConfigTest(unittest.TestCase):
                 self.assertFalse((self.profile_dir(session) / "github.account").exists())
                 self.assertEqual(calls[-2], ["config", "get", "user", "--host", "github.com"])
                 mounts = [data['args'][i+1] for i, a in enumerate(data['args']) if a == '-v']
-                self.assertEqual(mounts, [f"{self.volume(session)}:/home", f"{self.work}:/workspace"])
+                container_home = target.removesuffix("/.config/gh")
+                self.assertEqual(mounts, [f"{self.volume(session)}:/home", f"{self.work}:/workspace",
+                                          f"{self.home}/.gitconfig:{container_home}/.gitconfig:ro",
+                                          f"{self.home}/.gitmessage:{container_home}/.gitmessage:ro"])
+                self.assertTrue((self.home / ".gitconfig").is_file())
+                self.assertTrue((self.home / ".gitmessage").is_file())
                 self.assert_clean()
         self.assertFalse((self.home / "bin/devil").exists())
         self.assertFalse((self.home / ".claude").exists())
