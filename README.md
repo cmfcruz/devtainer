@@ -78,7 +78,7 @@ Configure them inside the selected session. The host `~/.gitconfig` and
 `~/.gitmessage` are mounted read-only at the same paths under the container home,
 so all sessions share the host Git configuration and commit template. Missing
 files are created on the host before launch. Host Claude state, Neovim
-configuration, dependency caches, and the host GPG agent are not mounted.
+configuration and dependency caches are not mounted.
 The container home is `/home/<build username>`, regardless of the host home path.
 
 Session names contain 1-48 letters, digits, underscores, or hyphens, starting with
@@ -207,10 +207,22 @@ The image uses UTF-8 (`C.UTF-8`) and includes a Neovim UTF-8 plugin. The bundled
 buoy.nvim plugin lives in the system runtime, outside session homes, and connects
 agents to live editor context without sharing the host's Neovim state.
 
-Git identity comes from the mounted host configuration. Signing credentials
-are configured within each session. No host
-GPG socket or keyring is automatically shared. Private keys created in a session
-are part of that session's home state and are deleted by `reset-home`.
+Git identity and signing settings come from the mounted host configuration.
+For signing, the launcher forwards the host GPG agent extra socket to
+`~/.gnupg/S.gpg-agent` in the container and mounts the host `~/.gnupg/pubring.kbx`
+and `~/.gnupg/trustdb.gpg` read-only when present. Private key files stay on the
+host; container processes can request signatures through the host agent.
+
+Start the agent on the host before launching a container:
+
+```bash
+gpgconf --launch gpg-agent
+gpgconf --list-dirs agent-extra-socket
+```
+
+If the extra socket is unavailable, the launcher warns and continues without
+agent forwarding. Passphrase prompts are handled by the host agent. Private keys
+created inside a session persist in its home and are deleted by `reset-home`.
 
 ## Container Sandbox
 
@@ -241,7 +253,7 @@ workspace. The host Wayland socket is shared when available. A malicious process
 can persist inside its session home until reset.
 
 The launcher does not share host Claude configuration, host home caches, host
-Neovim settings, the host GPG agent, SSH keys, cloud credentials, or the Docker
+Neovim settings, GPG private key files, SSH keys, cloud credentials, or the Docker
 socket. However, anything inside the directory selected as the workspace is
 reachable. Do not use a broad workspace containing sensitive host files. Project
 scripts and Git hooks changed inside a container can execute later on the host.

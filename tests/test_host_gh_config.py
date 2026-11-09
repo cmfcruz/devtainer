@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -93,6 +94,9 @@ class HostGhConfigTest(unittest.TestCase):
             '    print(os.environ.get("TEST_TOKEN", token))\n'
         )
         gh.chmod(0o755)
+        gpgconf = self.fake_bin / "gpgconf"
+        gpgconf.write_text('#!/bin/sh\nprintf "%s\\n" "${TEST_GPG_SOCKET:-/nonexistent/devtainer-gpg-socket}"\n')
+        gpgconf.chmod(0o755)
         docker = self.fake_bin / "docker"
         docker.write_text(DOCKER)
         docker.chmod(0o755)
@@ -128,6 +132,34 @@ class HostGhConfigTest(unittest.TestCase):
 
     def assert_clean(self):
         self.assertEqual(list(self.tmp_root.glob("devtainer-gh.*")), [])
+
+    def test_host_gpg_agent_and_public_keyrings_are_mounted(self):
+        gpg_dir = self.home / ".gnupg"
+        gpg_dir.mkdir()
+        for name in ("pubring.kbx", "trustdb.gpg", "private-keys-v1.d"):
+            (gpg_dir / name).touch()
+        with socket.socket(socket.AF_UNIX) as agent:
+            agent_path = self.tmp_root / "agent-extra"
+            agent.bind(str(agent_path))
+            result = self.launch(overrides={"TEST_GPG_SOCKET": str(agent_path)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.log.read_text())["args"]
+        user = subprocess.check_output(["id", "-un"], text=True).strip()
+        target = f"/home/{user}/.gnupg"
+        self.assertIn(f"GNUPGHOME={target}", args)
+        self.assertIn("GPG_TTY=/dev/tty", args)
+        self.assertIn(f"{agent_path}:{target}/S.gpg-agent", args)
+        for name in ("pubring.kbx", "trustdb.gpg"):
+            self.assertIn(f"{gpg_dir}/{name}:{target}/{name}:ro", args)
+        self.assertFalse(any("private-keys-v1.d" in arg for arg in args))
+        self.assertNotIn("host GPG extra socket not found", result.stderr)
+
+    def test_missing_gpg_agent_warns_and_continues(self):
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("host GPG extra socket not found", result.stderr)
+        args = json.loads(self.log.read_text())["args"]
+        self.assertFalse(any("S.gpg-agent" in arg for arg in args))
 
     def test_sessions_have_distinct_homes_and_use_active_host_account(self):
         for session, token in (("dev", TOKEN), ("personal", TOKEN)):

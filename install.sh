@@ -80,7 +80,7 @@ install -m 0644 security/claude-sandbox-seccomp.json "${SECCOMP_PROFILE}"
   printf 'container_home=%q\n' "/home/$USERNAME"
   printf 'seccomp_profile=%q\n' "$SECCOMP_PROFILE"
   cat scripts/session-launcher.sh scripts/run-container.sh \
-    scripts/github-config.sh scripts/wayland.sh scripts/start-container.sh
+    scripts/github-config.sh scripts/wayland.sh scripts/gpg.sh scripts/start-container.sh
 } > "$DEV_BIN"
 chmod +x "$DEV_BIN"
 echo "Installed $DEV_BIN. Use dev for session dev, or dev --session personal for a separate persistent home."
