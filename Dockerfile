@@ -79,6 +79,7 @@ RUN apt-get update \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install GitHub CLI from its pinned upstream release instead of Ubuntu's package.
+# Keep Ubuntu's gh path available for host Git configs mounted into the container.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "${arch}" in \
@@ -92,6 +93,7 @@ RUN set -eux; \
     echo "${gh_sha256}  /tmp/${gh_archive}" | sha256sum -c -; \
     tar -xzf "/tmp/${gh_archive}" -C /tmp "${gh_release}/bin/gh"; \
     install -m 0755 "/tmp/${gh_release}/bin/gh" /usr/local/bin/gh; \
+    ln -s /usr/local/bin/gh /usr/bin/gh; \
     rm -rf "/tmp/${gh_archive}" "/tmp/${gh_release}"; \
     gh --version
 
